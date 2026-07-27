@@ -1,10 +1,23 @@
 # CabalSpy MCP server — KOL and smart money wallet tracking for AI assistants
 
+[![Smithery](https://img.shields.io/badge/Smithery-listed-blueviolet?style=flat-square)](https://smithery.ai/servers/cabalspy)
+[![Glama](https://img.shields.io/badge/Glama-listed-blue?style=flat-square)](https://glama.ai/mcp/servers/CabalSpy/CabalSpy-MCP-Server)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet?style=flat-square)](https://modelcontextprotocol.io/)
+[![Chains](https://img.shields.io/badge/chains-5-brightgreen?style=flat-square)](#chain-coverage)
+[![Tools](https://img.shields.io/badge/tools-21-brightgreen?style=flat-square)](#tools)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
+
 Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy monitors labeled wallets — key opinion leaders (KOLs), smart money and whales — across **Solana, Base, BNB Chain, Ethereum and Robinhood Chain**, and exposes the data as Model Context Protocol tools.
 
 Connect it to Claude, Cursor, or any MCP client and ask about onchain trading activity in plain language. No code, no SDK, no integration work.
 
 **What people use it for:** vetting a KOL call before following it, checking whether a launch was bundled, finding which wallets accumulate together, building copy-trading shortlists, and answering "who is this address" in one line.
+
+**The multichain one.** Most onchain KOL tooling is Solana only. CabalSpy tracks labeled wallets on
+five chains — Solana, Base, BNB Chain, Ethereum and Robinhood Chain — through one connection and one
+set of tools. The same question works everywhere: *"who bought this?"*
+
+Powering labeled-wallet data inside Axiom, Trojan, o1.exchange and 20+ other trading tools.
 
 - **Remote endpoint:** `https://mcp.cabalspy.xyz/mcp`
 - **Transport:** Streamable HTTP
@@ -104,9 +117,31 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 ## Connecting
 
-### Claude Desktop / claude.ai
+### claude.ai (web)
 
-Settings → Connectors → add a custom connector pointing to `https://mcp.cabalspy.xyz/mcp`, with the header `X-CabalSpy-Key: <your key>`.
+The web connector cannot send custom headers — it only speaks OAuth. Put the key in the URL instead:
+
+```
+https://mcp.cabalspy.xyz/mcp?api_key=your_key
+```
+
+Settings → Connectors → Add custom connector, paste that URL, and leave the OAuth client fields **empty**. Filling them starts an OAuth flow this server does not implement, and you get a 404 on `/authorize`.
+
+### Claude Desktop
+
+Claude Desktop reads a config file, so the header works and is preferred:
+
+```json
+{
+  "mcpServers": {
+    "cabalspy": {
+      "type": "http",
+      "url": "https://mcp.cabalspy.xyz/mcp",
+      "headers": { "X-CabalSpy-Key": "your_key" }
+    }
+  }
+}
+```
 
 ### Cursor, VS Code and others
 
@@ -122,50 +157,73 @@ Settings → Connectors → add a custom connector pointing to `https://mcp.caba
 }
 ```
 
-## Responses are compacted on purpose
+## Built for depth
 
-A 30-day wallet report from the API can carry more than 70,000 values. Handing that to a model costs a fortune, overruns the context window, and does not help it answer anything.
+CabalSpy does not return samples. A 30-day wallet report covers every token the wallet touched, every
+trade, and the full PnL curve — routinely tens of thousands of data points. That depth is why trading
+terminals run on this data.
 
-Responses that fit are returned untouched. Only when a payload would exceed the budget are lists shortened, and the payload then says so explicitly, which stops a model from assuming it saw the whole picture. In testing, a 411 KB payload became 14 KB with every summary field intact.
+A language model works within a context window, so this server delivers that depth in a shape a model
+can actually reason about. Every summary block comes through complete: period stats, win-rate
+distribution, holder counts, PnL totals, profiles. Long detail lists are shortened, and the response
+states exactly how many entries were left out, so a model never mistakes an excerpt for the whole
+picture.
 
-## What the model is told about
+Responses that already fit are returned untouched.
 
-Some of the API's behaviour is surprising, so the tool descriptions and the server instructions state it outright rather than letting a model guess:
+Need every row? That is what the [SDKs](#also-available-as-an-sdk) and the REST API are for. Nothing
+is lost here, it is one call away.
 
-- **Market cap and unrealized PnL are Solana-only.** On the other four chains those fields are null by design.
-- **`realized_pnl` is sales minus purchases.** A wallet still holding everything it bought reports its whole investment as a loss at -100 percent. `still_holding` disambiguates.
-- **`lookup_wallet` can report the wrong chain.** The same EVM address may be tracked on several, and only the first match is returned.
-- **Signals are not paginable.** The endpoint reports that more results exist but returns no usable cursor, so raise the limit instead.
-- **Bundle detection is Solana-only**, since it depends on Jito bundles.
+## Data notes the model is given
+
+A model that guesses about data semantics will state something confidently wrong. So the tool
+descriptions spell out how to read the numbers:
+
+- **Market cap and unrealized PnL are Solana-native.** The other four chains report realized PnL,
+  invested amounts, holdings and counters; market cap is not part of their dataset.
+- **`realized_pnl` is sales minus purchases.** A wallet that has bought and not yet sold therefore
+  shows its open position as negative. `still_holding` tells the two apart.
+- **`lookup_wallet` searches every chain.** EVM addresses are identical across chains, so a wallet
+  tracked on several returns the first match; pass a chain to the other tools when you need a
+  specific one.
+- **Bundle detection is Solana-native**, because it reads Jito bundles.
 
 ## Security
 
-The API key is read from the `X-CabalSpy-Key` header and sent onward as an `Authorization: Bearer` header, never as a query parameter — query strings end up in access logs, proxy logs and browser history. It is never accepted as a tool argument, so a model can neither see it nor write it into a transcript.
+The key is read from the `X-CabalSpy-Key` header where the client can send one, and from an
+`api_key` query parameter where it cannot. It is then forwarded to the CabalSpy API as an
+`Authorization: Bearer` header, never as a query parameter.
+
+The query parameter path is a deliberate compromise: claude.ai's web connector offers no way to
+set a header and expects OAuth, so without it the server is unusable there. The cost is that the
+key appears in the reverse proxy's access log. Keep those logs short, and prefer the header in
+every client that supports one.
+
+The key is never accepted as a tool argument, so a model can neither see it nor write it into a
+transcript. Every tool is annotated `readOnlyHint`; nothing in the CabalSpy API can modify state.
 
 Every tool is annotated `readOnlyHint`. Nothing in the CabalSpy API can modify state.
 
-## Running it
+## Self-hosting
+
+`mcp.cabalspy.xyz` runs the code in this repository. To run your own instance instead:
+
+```bash
+docker build -t cabalspy-mcp .
+docker run -p 8081:8081 cabalspy-mcp
+```
+
+Configuration and deployment are covered in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Contributing
 
 ```bash
 pip install -r requirements.txt
-MCP_PORT=8081 python3 cabalspy_mcp.py
-```
-
-Serves `http://0.0.0.0:8081/mcp`, with nginx terminating TLS in front.
-
-| Variable | Purpose |
-|---|---|
-| `CABALSPY_API_BASE` | REST endpoint, default `https://api.cabalspy.xyz` |
-| `CABALSPY_API_KEY` | fallback key for single-user or demo deployments |
-| `MCP_HOST`, `MCP_PORT` | bind address, default `0.0.0.0:8081` |
-
-## Tests
-
-```bash
 python3 test_server.py
 ```
 
-Starts a mock API, calls every tool, and checks the catalogue, the auth path, the guards, the error translation and the compaction. No API key, no network.
+The suite starts a mock API and exercises every tool, the auth paths, the client-side guards, the
+error translation and the response shaping. It needs no API key and no network.
 
 ## FAQ
 
@@ -192,6 +250,20 @@ Yes, your own. A free test key with 1000 requests is at [apidashboard.cabalspy.x
 ## Also available as an SDK
 
 If you are writing code rather than asking questions, the same API is available as [`cabalspy` on npm](https://www.npmjs.com/package/cabalspy), [PyPI](https://pypi.org/project/cabalspy/) and [crates.io](https://crates.io/crates/cabalspy), including the WebSocket streams this server deliberately does not expose.
+
+## Repository
+
+| File | Purpose |
+|---|---|
+| `cabalspy_mcp.py` | the server |
+| `test_server.py` | offline test suite, no key or network needed |
+| `server.json` | MCP registry entry |
+| `glama.json` | Glama directory listing |
+| `smithery-config-schema.json` | config schema shown to Smithery users |
+| `Dockerfile` | self-hosting and directory sandboxes |
+| `cabalspy-mcp.service` | hardened systemd unit |
+| `DEPLOYMENT.md` | operations, for self-hosters |
+
 
 ## License
 
