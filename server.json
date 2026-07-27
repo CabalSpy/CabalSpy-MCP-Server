@@ -1,12 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "xyz.cabalspy/wallet-tracker",
-  "description": "KOL, smart money & whale wallets API on Solana, BNB, Base, ETH: Wallet tracker, Leaderboard",
-  "version": "1.0.0",
+  "description": "KOL API and smart money wallet tracker for Solana, Base, BNB Chain, Ethereum and Robinhood Chain. Onchain KOL trades, whale wallets, PnL, copy-trading signals, token holders and Jito bundle detection.",
+  "version": "2.0.0",
   "remotes": [
     {
       "type": "streamable-http",
       "url": "https://mcp.cabalspy.xyz/mcp"
     }
-  ]
+  ],
+  "websiteUrl": "https://docs.cabalspy.xyz"
 }
