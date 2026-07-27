@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CabalSpy",
+  "description": "Optional. Without a key the server still answers get_started and get_api_status, so you can connect and look around first. Every data tool needs a key: a free one with 1000 requests is at https://apidashboard.cabalspy.xyz/",
+  "type": "object",
+  "properties": {
+    "api_key": {
+      "type": "string",
+      "title": "CabalSpy API key",
+      "description": "Your own CabalSpy key. Free test key with 1000 requests at https://apidashboard.cabalspy.xyz/ — leave empty to connect without one and call get_started for the links.",
+      "format": "password"
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
