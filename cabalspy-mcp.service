@@ -1,0 +1,51 @@
+# systemd unit for the CabalSpy MCP server.
+#
+#   sudo cp cabalspy-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cabalspy-mcp
+#
+# Adjust WorkingDirectory, User and the venv path to match your server.
+
+[Unit]
+Description=CabalSpy MCP server
+Documentation=https://docs.cabalspy.xyz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cabalspy
+Group=cabalspy
+WorkingDirectory=/opt/cabalspy-mcp
+
+# A dedicated virtualenv keeps the mcp version independent of system packages.
+ExecStart=/opt/cabalspy-mcp/.venv/bin/python /opt/cabalspy-mcp/cabalspy_mcp.py
+
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_PORT=8081
+Environment=CABALSPY_API_BASE=https://api.cabalspy.xyz
+# No CABALSPY_API_KEY here: every user brings their own via X-CabalSpy-Key.
+# Setting one would silently serve your key to anyone who forgets theirs.
+
+Restart=on-failure
+RestartSec=5
+# Give the process time to close in-flight requests before it is killed.
+TimeoutStopSec=20
+
+# Hardening. The process needs nothing but the network and its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cabalspy-mcp
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cabalspy-mcp
+
+[Install]
+WantedBy=multi-user.target
