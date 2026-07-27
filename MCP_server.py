@@ -21,20 +21,22 @@
 #   MCP_PORT=8081 python3 cabalspy_mcp.py
 #   → http://0.0.0.0:8081/mcp
 #
-# ── WHY THE RESPONSES ARE TRIMMED ─────────────────────────────────────────────
-# A 30-day wallet report from this API can carry more than 70,000 values. Handing
-# that to a model costs a fortune, overruns the context window, and does not help
-# it answer anything. Every response therefore goes through `_compact`, which cuts
-# long lists and states in the payload that it did so — otherwise a model assumes
-# it saw everything and reasons from a partial picture without knowing it.
+# ── SHAPING RESPONSES FOR A MODEL ─────────────────────────────────────────────
+# CabalSpy returns depth: a 30-day wallet report covers every token touched, every
+# trade and the full PnL curve. A language model works inside a context window, so
+# `_compact` delivers that depth in a readable shape — summary blocks complete,
+# long detail lists shortened, and the payload stating how many entries it left
+# out so a model never mistakes an excerpt for the whole picture. Callers who want
+# every row use the SDKs or the REST API.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import json
 import os
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import Field
 
 try:
     from mcp.types import ToolAnnotations
@@ -84,8 +86,9 @@ mcp = FastMCP(
         "and whales — across Solana, BNB Chain, Base, Ethereum and Robinhood Chain (rh). "
         "The tools cover wallets, tokens, the live trade feed, cluster signals, aggregate "
         "analytics and Jito bundle detection.\n\n"
-        "Each user supplies their own CabalSpy API key through the 'X-CabalSpy-Key' header. "
-        "If a tool returns an auth error, call 'get_started' for a free test key.\n\n"
+        "Each user supplies their own CabalSpy API key, either through the 'X-CabalSpy-Key' "
+        "header or as an 'api_key' query parameter on the connection URL. If a tool returns "
+        "an auth error, call 'get_started' for a free test key.\n\n"
         "Three things worth knowing before interpreting results:\n"
         "1. Market cap, price and unrealized PnL are returned for Solana only. On bnb, base, "
         "eth and rh those fields are null by design; realized PnL, invested amounts and "
@@ -132,10 +135,9 @@ def _trim(value: Any, max_items: int, depth: int = 0) -> Any:
 def _compact(data: Any, max_items: int = DEFAULT_MAX_ITEMS) -> Any:
     """Returns the payload whole when it fits, and trims progressively when not.
 
-    Trimming eagerly would damage small responses for no reason: a 30 entry PnL
-    chart loses its shape if it is cut to 15 for a payload that was never too big
-    in the first place. So the full payload is measured first, and only a genuine
-    overrun triggers the cut.
+    Measuring first matters: trimming eagerly would flatten small responses for no
+    reason, and a 30 entry PnL chart loses its shape if cut to 15 when it was never
+    too large. Only a genuine overrun triggers the cut.
     """
     for items in (None, max_items, 8, 4, 2, 1):
         trimmed = _trim(data, items if items is not None else 10**9)
@@ -162,13 +164,31 @@ def _compact(data: Any, max_items: int = DEFAULT_MAX_ITEMS) -> Any:
 
 
 def _resolve_key(ctx: Context | None) -> str:
-    """Key from the 'X-CabalSpy-Key' header, falling back to the environment."""
+    """Resolves the caller's key, in order of preference.
+
+    1. The 'X-CabalSpy-Key' header. Preferred: headers do not end up in logs,
+       browser history or referrers. Works in Cursor, VS Code, Claude Desktop
+       and anything else with a config file.
+    2. An 'api_key' or 'key' query parameter on the connection URL. Needed
+       because some clients, claude.ai's web connector among them, offer no way
+       to set a custom header and expect OAuth instead. A query parameter is the
+       only channel left there.
+    3. The environment, for single-user or demo deployments.
+
+    The query parameter is a deliberate compromise, not an oversight: the key
+    will appear in the reverse proxy's access log. Keep those logs short, and
+    prefer the header wherever the client allows it.
+    """
     try:
         req = ctx.request_context.request if ctx else None
         if req is not None:
             hdr = req.headers.get("x-cabalspy-key")
             if hdr:
                 return hdr.strip()
+            for name in ("api_key", "key", "cabalspy_key"):
+                value = req.query_params.get(name)
+                if value:
+                    return value.strip()
     except Exception:
         pass
     return ENV_KEY
@@ -177,8 +197,10 @@ def _resolve_key(ctx: Context | None) -> str:
 _NO_KEY = {
     "error": "missing_api_key",
     "message": (
-        "No CabalSpy API key provided. Set the 'X-CabalSpy-Key' header in your MCP client "
-        "config. A free test key with 1000 requests is available — call 'get_started'."
+        "No CabalSpy API key provided. Either set the 'X-CabalSpy-Key' header in your MCP "
+        "client config, or append ?api_key=<your-key> to the connection URL if your client "
+        "cannot send custom headers. A free test key with 1000 requests is available — "
+        "call 'get_started'."
     ),
     "get_test_key": DASHBOARD_URL,
     "pricing": PRICING_URL,
@@ -286,13 +308,56 @@ def _check_type(chain: str, wallet_type: str | None) -> dict | None:
     return None
 
 
+# ── Parameter types ───────────────────────────────────────────────────────────
+# Descriptions attached here end up in each tool's JSON Schema, which is what a
+# model reads when deciding how to fill an argument. A description buried in the
+# docstring does not: it becomes prose about the tool, not about the parameter.
+
+ChainArg = Annotated[str, Field(description=(
+    "Blockchain. One of: solana, bnb, base, eth, rh. solana has kol, smart and whale "
+    "wallets; bnb, base and rh have kol and smart; eth has kol only. rh is Robinhood "
+    "Chain, an Ethereum L2."
+))]
+WalletTypeArg = Annotated[str, Field(description=(
+    "Wallet type. kol is a Key Opinion Leader, an influencer whose calls move markets. "
+    "smart is a wallet selected for its track record. whale is a large holder, Solana only."
+))]
+OptionalWalletTypeArg = Annotated[str, Field(description=(
+    "Restrict to one wallet type: kol, smart or whale. Leave empty to merge all types "
+    "the chain has."
+))]
+AddressArg = Annotated[str, Field(description=(
+    "Wallet address. Base58 on Solana, 0x-prefixed hex on the EVM chains."
+))]
+MintArg = Annotated[str, Field(description=(
+    "Token address: the mint on Solana, the contract address on the EVM chains."
+))]
+OptionalMintArg = Annotated[str, Field(description=(
+    "Restrict the result to a single token. Leave empty for all tokens."
+))]
+PeriodArg = Annotated[str, Field(description=(
+    "Statistics window: 6h, 1d, 7d or 30d. Longer windows return far more data and get "
+    "trimmed harder, so prefer the shortest window that answers the question."
+))]
+CursorArg = Annotated[str, Field(description=(
+    "Pagination cursor taken from the previous response. Leave empty for the first page."
+))]
+LimitArg = Annotated[int, Field(ge=1, le=200, description=(
+    "How many entries to return. Keep it small: large results are trimmed to fit the "
+    "context window anyway."
+))]
+HoursArg = Annotated[int, Field(ge=1, le=24, description=(
+    "Observation window in hours. The server caps this at 24."
+))]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  ONBOARDING
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@tool(annotations=READ_ONLY)
-async def get_started() -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_started() -> dict[str, Any]:
     """
     How to use CabalSpy: where to get a free API key (1000 requests, no cost),
     pricing, documentation, and what the data covers. Call this first if you do
@@ -308,10 +373,16 @@ async def get_started() -> dict:
                           "details": "Create a free test key with 1000 requests at no cost."},
         "pricing": PRICING_URL,
         "docs": DOCS_URL,
-        "how_to_set_key": (
-            "Add 'X-CabalSpy-Key: <your-key>' to the headers in your MCP client's server "
-            "config, then call any data tool."
-        ),
+        "how_to_set_key": {
+            "clients_with_a_config_file": (
+                "Cursor, VS Code, Claude Desktop: add 'X-CabalSpy-Key: <your-key>' to the "
+                "headers of the server entry. Preferred, because the key stays out of logs."
+            ),
+            "clients_without_custom_headers": (
+                "claude.ai and anything else that only offers OAuth: append the key to the "
+                "connection URL instead, as https://mcp.cabalspy.xyz/mcp?api_key=<your-key>"
+            ),
+        },
         "chains": CHAINS,
         "wallet_types_by_chain": WALLET_TYPES_BY_CHAIN,
         "periods": ["6h", "1d", "7d", "30d"],
@@ -335,8 +406,8 @@ async def get_started() -> dict:
     }
 
 
-@tool(annotations=READ_ONLY)
-async def get_api_status(ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_api_status(ctx: Context = None) -> dict[str, Any]:
     """
     Service health and current coverage: chains, wallet types, periods, limits and
     how many wallets are tracked per chain. Useful when a query returns nothing and
@@ -353,8 +424,8 @@ async def get_api_status(ctx: Context = None) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@tool(annotations=READ_ONLY)
-async def lookup_wallet(address: str, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def lookup_wallet(address: AddressArg, ctx: Context = None) -> dict[str, Any]:
     """
     Identify a wallet address: is it tracked, and by what name. Returns the label
     CabalSpy attached to it — name, Twitter, Telegram, wallet type and chain.
@@ -368,9 +439,10 @@ async def lookup_wallet(address: str, ctx: Context = None) -> dict:
     return await _request("GET", "/v1/wallets/lookup", ctx, {"address": address})
 
 
-@tool(annotations=READ_ONLY)
-async def get_wallet_tracker(blockchain: str, address: str, period: str = "1d",
-                             ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_wallet_tracker(blockchain: ChainArg, address: AddressArg,
+                             period: PeriodArg = "1d",
+                             ctx: Context = None) -> dict[str, Any]:
     """
     Period statistics for ONE wallet: realized PnL, win rate, volume, trade counts,
     active tokens and win-rate distribution. The main tool for "how is this trader
@@ -387,9 +459,10 @@ async def get_wallet_tracker(blockchain: str, address: str, period: str = "1d",
                           {"blockchain": blockchain, "address": address, "period": period})
 
 
-@tool(annotations=READ_ONLY)
-async def get_leaderboard(blockchain: str, wallet_type: str = "kol", period: str = "1d",
-                          limit: int = 20, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_leaderboard(blockchain: ChainArg, wallet_type: WalletTypeArg = "kol",
+                          period: PeriodArg = "1d", limit: LimitArg = 20,
+                          ctx: Context = None) -> dict[str, Any]:
     """
     Top tracked wallets ranked by performance for a chain, wallet type and period.
     Use for "best Solana KOLs today", "top whales this week", and similar.
@@ -406,9 +479,10 @@ async def get_leaderboard(blockchain: str, wallet_type: str = "kol", period: str
                            "period": period, "limit": limit})
 
 
-@tool(annotations=READ_ONLY)
-async def list_wallets(blockchain: str, wallet_type: str, limit: int = 50,
-                       cursor: str = "", ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def list_wallets(blockchain: ChainArg, wallet_type: WalletTypeArg,
+                       limit: LimitArg = 50, cursor: CursorArg = "",
+                       ctx: Context = None) -> dict[str, Any]:
     """
     Browse the wallets CabalSpy tracks for a chain and wallet type. Use this to
     answer which KOLs or smart money wallets are covered at all. Always pass a
@@ -426,9 +500,10 @@ async def list_wallets(blockchain: str, wallet_type: str, limit: int = 50,
                            "limit": limit, "cursor": cursor})
 
 
-@tool(annotations=READ_ONLY)
-async def get_wallet_history(blockchain: str, address: str, cursor: str = "",
-                             limit: int = 50, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_wallet_history(blockchain: ChainArg, address: AddressArg,
+                             cursor: CursorArg = "", limit: LimitArg = 50,
+                             ctx: Context = None) -> dict[str, Any]:
     """
     Lifetime trading history of a wallet: aggregate stats, a per-token overview and
     the individual trades. Use for what a wallet traded historically, rather than
@@ -449,8 +524,9 @@ async def get_wallet_history(blockchain: str, address: str, cursor: str = "",
                            "cursor": cursor, "limit": min(limit, 200)})
 
 
-@tool(annotations=READ_ONLY)
-async def get_wallet_holdings(blockchain: str, address: str, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_wallet_holdings(blockchain: ChainArg, address: AddressArg,
+                              ctx: Context = None) -> dict[str, Any]:
     """
     Current onchain token holdings of a wallet, read live rather than derived from
     tracked trades. Slower than the other wallet tools, often over a second. If
@@ -465,8 +541,9 @@ async def get_wallet_holdings(blockchain: str, address: str, ctx: Context = None
                           {"blockchain": blockchain, "address": address})
 
 
-@tool(annotations=READ_ONLY)
-async def get_pnl_calendar(blockchain: str, address: str, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_pnl_calendar(blockchain: ChainArg, address: AddressArg,
+                           ctx: Context = None) -> dict[str, Any]:
     """
     Daily and monthly realized profit and loss for a wallet across its tracked
     history. Use for when a wallet made or lost money, and for spotting streaks.
@@ -480,9 +557,10 @@ async def get_pnl_calendar(blockchain: str, address: str, ctx: Context = None) -
                           {"blockchain": blockchain, "address": address})
 
 
-@tool(annotations=READ_ONLY)
-async def get_wallet_connections(blockchain: str, address: str, limit: int = 25,
-                                 ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_wallet_connections(blockchain: ChainArg, address: AddressArg,
+                                 limit: LimitArg = 25,
+                                 ctx: Context = None) -> dict[str, Any]:
     """
     Other tracked wallets that traded the same tokens as this one over the last 30
     days, ranked by overlap. Useful for finding groups that move together, which
@@ -498,9 +576,16 @@ async def get_wallet_connections(blockchain: str, address: str, limit: int = 25,
                           {"blockchain": blockchain, "address": address, "limit": limit})
 
 
-@tool(annotations=READ_ONLY)
-async def compare_wallets(blockchain: str, addresses: list[str], wallet_type: str = "kol",
-                          period: str = "7d", ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def compare_wallets(
+    blockchain: ChainArg,
+    addresses: Annotated[list[str], Field(max_length=100, description=(
+        "Up to 100 wallet addresses. Far cheaper than calling get_wallet_tracker once "
+        "per wallet."))],
+    wallet_type: WalletTypeArg = "kol",
+    period: PeriodArg = "7d",
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     Statistics for up to 100 wallets in a single request. Much cheaper than calling
     get_wallet_tracker repeatedly. Use when the user names several wallets, or to
@@ -529,9 +614,10 @@ async def compare_wallets(blockchain: str, addresses: list[str], wallet_type: st
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@tool(annotations=READ_ONLY)
-async def get_token_stats(blockchain: str, mint: str, wallet_type: str = "",
-                          ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_token_stats(blockchain: ChainArg, mint: MintArg,
+                          wallet_type: OptionalWalletTypeArg = "",
+                          ctx: Context = None) -> dict[str, Any]:
     """
     Who is trading a token: how many KOLs, smart money wallets and whales hold it,
     total bought and sold, buying pressure, first and latest entry, and the
@@ -551,9 +637,11 @@ async def get_token_stats(blockchain: str, mint: str, wallet_type: str = "",
                           {"blockchain": blockchain, "mint": mint, "type": wallet_type})
 
 
-@tool(annotations=READ_ONLY)
-async def get_token_holders(blockchain: str, mint: str, wallet_type: str = "",
-                            limit: int = 25, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_token_holders(blockchain: ChainArg, mint: MintArg,
+                            wallet_type: OptionalWalletTypeArg = "",
+                            limit: LimitArg = 25,
+                            ctx: Context = None) -> dict[str, Any]:
     """
     The tracked wallets holding a token, sorted by balance, with market cap and
     price in USD on Solana. Use when the user asks who is still holding, rather
@@ -571,9 +659,11 @@ async def get_token_holders(blockchain: str, mint: str, wallet_type: str = "",
                            "type": wallet_type, "limit": limit})
 
 
-@tool(annotations=READ_ONLY)
-async def get_token_transactions(blockchain: str, mint: str, wallet_type: str = "",
-                                 limit: int = 25, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_token_transactions(blockchain: ChainArg, mint: MintArg,
+                                 wallet_type: OptionalWalletTypeArg = "",
+                                 limit: LimitArg = 25,
+                                 ctx: Context = None) -> dict[str, Any]:
     """
     Individual buys and sells by tracked wallets in one token, most recent first.
     Use for the sequence of events, for example whether KOLs bought before or after
@@ -591,9 +681,15 @@ async def get_token_transactions(blockchain: str, mint: str, wallet_type: str = 
                            "type": wallet_type, "limit": limit})
 
 
-@tool(annotations=READ_ONLY)
-async def compare_tokens(blockchain: str, mints: list[str], wallet_type: str = "kol",
-                         ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def compare_tokens(
+    blockchain: ChainArg,
+    mints: Annotated[list[str], Field(max_length=100, description=(
+        "Up to 100 token addresses. Use for shortlists, or to follow up on the "
+        "most_traded analytics view."))],
+    wallet_type: WalletTypeArg = "kol",
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     Statistics for up to 100 tokens in a single request. Use for shortlists, or to
     follow up on the most-traded analytics view.
@@ -615,8 +711,12 @@ async def compare_tokens(blockchain: str, mints: list[str], wallet_type: str = "
         "fields": ["token", "total_holders", "total_statistics"]})
 
 
-@tool(annotations=READ_ONLY)
-async def detect_bundles(mint: str, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def detect_bundles(
+    mint: Annotated[str, Field(description=(
+        "The Solana token mint address to inspect for bundled buys."))],
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     Check whether KOL wallets bought a Solana token through Jito bundles together
     with side wallets they control, which hides the real size of their position.
@@ -639,9 +739,17 @@ async def detect_bundles(mint: str, ctx: Context = None) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@tool(annotations=READ_ONLY)
-async def get_recent_trades(blockchain: str, wallet_type: str = "kol", minutes: int = 0,
-                            mint: str = "", limit: int = 25, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_recent_trades(
+    blockchain: ChainArg,
+    wallet_type: WalletTypeArg = "kol",
+    minutes: Annotated[int, Field(ge=0, le=60, description=(
+        "Only trades from the last N minutes, at most 60. Leave at 0 for the most "
+        "recent trades regardless of age."))] = 0,
+    mint: OptionalMintArg = "",
+    limit: LimitArg = 25,
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     The live feed: what tracked wallets are buying and selling right now, across
     every token or filtered to one. Use for "what are KOLs buying at the moment".
@@ -662,9 +770,10 @@ async def get_recent_trades(blockchain: str, wallet_type: str = "kol", minutes: 
     return await _request("GET", "/v1/transactions/latest", ctx, params)
 
 
-@tool(annotations=READ_ONLY)
-async def get_activity_metrics(blockchain: str, wallet_type: str = "kol", hours: int = 1,
-                               mint: str = "", ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_activity_metrics(blockchain: ChainArg, wallet_type: WalletTypeArg = "kol",
+                               hours: HoursArg = 1, mint: OptionalMintArg = "",
+                               ctx: Context = None) -> dict[str, Any]:
     """
     How many trades happened and how much value moved over a window of up to 24
     hours, plus how many distinct wallets were involved. Use for how busy the
@@ -684,10 +793,23 @@ async def get_activity_metrics(blockchain: str, wallet_type: str = "kol", hours:
     return {"count": count, "volume": volume}
 
 
-@tool(annotations=READ_ONLY)
-async def get_signals(blockchain: str, wallet_type: str = "kol", mode: str = "cluster",
-                      hours: int = 6, min_wallets: int = 0, min_win_rate: float = 0,
-                      limit: int = 15, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_signals(
+    blockchain: ChainArg,
+    wallet_type: WalletTypeArg = "kol",
+    mode: Annotated[str, Field(description=(
+        "cluster means several wallets bought the same token, the strongest signal. "
+        "entry marks fresh positions. exit marks wallets selling out."))] = "cluster",
+    hours: Annotated[int, Field(ge=1, le=168, description=(
+        "Observation window in hours."))] = 6,
+    min_wallets: Annotated[int, Field(ge=0, le=50, description=(
+        "Minimum wallets in a cluster. Higher means fewer but stronger signals. "
+        "0 uses the server default of 3."))] = 0,
+    min_win_rate: Annotated[float, Field(ge=0, le=100, description=(
+        "Only count wallets above this historical win rate, 0 to 100. 0 disables it."))] = 0,
+    limit: LimitArg = 15,
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     Tokens where several tracked wallets acted within the same window.
 
@@ -723,9 +845,17 @@ async def get_signals(blockchain: str, wallet_type: str = "kol", mode: str = "cl
     return await _request("GET", "/v1/signals", ctx, params, max_items=6)
 
 
-@tool(annotations=READ_ONLY)
-async def get_signal_history(blockchain: str, wallet_type: str = "kol", days: str = "30",
-                             mode: str = "", limit: int = 25, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_signal_history(
+    blockchain: ChainArg,
+    wallet_type: WalletTypeArg = "kol",
+    days: Annotated[str, Field(description=(
+        "How far back to look: 7, 30, 90 or all."))] = "30",
+    mode: Annotated[str, Field(description=(
+        "Restrict to cluster, entry or exit. Leave empty for every mode."))] = "",
+    limit: LimitArg = 25,
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     Past signals, for checking whether a kind of signal has worked historically
     before acting on a live one.
@@ -743,9 +873,18 @@ async def get_signal_history(blockchain: str, wallet_type: str = "kol", days: st
                            "days": days, "mode": mode, "limit": limit}, max_items=8)
 
 
-@tool(annotations=READ_ONLY)
-async def get_analytics(blockchain: str, mode: str, wallet_type: str = "kol",
-                        period: str = "7d", limit: int = 20, ctx: Context = None) -> dict:
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_analytics(
+    blockchain: ChainArg,
+    mode: Annotated[str, Field(description=(
+        "volume_trend shows activity over time. most_traded lists the tokens getting the "
+        "most attention. win_rate gives the distribution of outcomes. top_performers ranks "
+        "wallets by profit."))],
+    wallet_type: WalletTypeArg = "kol",
+    period: PeriodArg = "7d",
+    limit: LimitArg = 20,
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
     Four aggregate views over the tracked wallets.
 
