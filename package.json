@@ -29,10 +29,10 @@
   "homepage": "https://www.cabalspy.xyz/mcp/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_ORG/cabalspy-mcp.git"
+    "url": "git+https://github.com/CabalSpy/CabalSpy-MCP-Server.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_ORG/cabalspy-mcp/issues"
+    "url": "https://github.com/CabalSpy/CabalSpy-MCP-Server/issues"
   },
   "type": "module",
   "bin": {
