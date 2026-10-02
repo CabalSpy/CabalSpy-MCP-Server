@@ -47,7 +47,7 @@ API_BASE = os.environ.get("CABALSPY_API_BASE", "https://api.cabalspy.xyz")
 ENV_KEY = os.environ.get("CABALSPY_API_KEY", "")  # fallback for demo/single user
 TIMEOUT = 30.0
 
-PRICING_URL = "https://cabalspy.xyz/pricing"
+PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
 DOCS_URL = "https://docs.cabalspy.xyz"
 

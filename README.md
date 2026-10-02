@@ -23,7 +23,9 @@ Powering labeled-wallet data inside Axiom, Trojan, o1.exchange and 20+ other tra
 - **Transport:** Streamable HTTP
 - **Auth:** per-user API key via the `X-CabalSpy-Key` header
 - **Free test key:** 1000 requests at [apidashboard.cabalspy.xyz](https://apidashboard.cabalspy.xyz/)
-- **Pricing:** [cabalspy.xyz/pricing](https://cabalspy.xyz/pricing)
+- **Pricing:** [cabalspy.xyz/pricing](https://www.cabalspy.xyz/pricing/)
+- **Website:** [cabalspy.xyz/mcp](https://www.cabalspy.xyz/mcp/) — setup guide for Claude, Cursor and VS Code
+- **Trade what you find:** [CabalSpy Terminal](https://app.cabalspy.xyz/)
 
 ## Chain coverage
 
