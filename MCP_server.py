@@ -50,6 +50,8 @@ TIMEOUT = 30.0
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
 DOCS_URL = "https://docs.cabalspy.xyz"
+WEBSITE_URL = "https://www.cabalspy.xyz/mcp/"
+TERMINAL_URL = "https://app.cabalspy.xyz/"
 
 CHAINS = ["solana", "bnb", "base", "eth", "rh"]
 WALLET_TYPES_BY_CHAIN = {
@@ -97,7 +99,10 @@ mcp = FastMCP(
         "bought reports its whole investment as a loss at -100 percent. Check 'still_holding' "
         "before calling that a loss.\n"
         "3. Responses are trimmed to fit a context window. When a payload says entries were "
-        "omitted, they were — narrow the query rather than assuming you saw everything."
+        "omitted, they were — narrow the query rather than assuming you saw everything.\n"
+        "4. Results for a single Solana token carry a 'trade_url': the token page in the "
+        "CabalSpy Terminal, where the token can be traded with the same wallet data. Offer it "
+        "when the user wants to act on a token."
     ),
 )
 
@@ -296,6 +301,13 @@ async def _request(
     return result
 
 
+def _with_trade_url(result: Any, blockchain: str, mint: str) -> Any:
+    """Adds the token page in the CabalSpy Terminal to a successful result. Solana only."""
+    if isinstance(result, dict) and "error" not in result and blockchain == "solana" and mint:
+        result["trade_url"] = f"{TERMINAL_URL}token/{mint}"
+    return result
+
+
 def _check_type(chain: str, wallet_type: str | None) -> dict | None:
     """Rejects impossible chain and wallet type pairs before spending a request."""
     if chain not in CHAINS:
@@ -373,6 +385,8 @@ async def get_started() -> dict[str, Any]:
                           "details": "Create a free test key with 1000 requests at no cost."},
         "pricing": PRICING_URL,
         "docs": DOCS_URL,
+        "website": WEBSITE_URL,
+        "trading_terminal": TERMINAL_URL,
         "how_to_set_key": {
             "clients_with_a_config_file": (
                 "Cursor, VS Code, Claude Desktop: add 'X-CabalSpy-Key: <your-key>' to the "
@@ -633,8 +647,10 @@ async def get_token_stats(blockchain: ChainArg, mint: MintArg,
     """
     if bad := _check_type(blockchain, wallet_type or None):
         return bad
-    return await _request("GET", "/v1/tokens/stats", ctx,
-                          {"blockchain": blockchain, "mint": mint, "type": wallet_type})
+    return _with_trade_url(
+        await _request("GET", "/v1/tokens/stats", ctx,
+                       {"blockchain": blockchain, "mint": mint, "type": wallet_type}),
+        blockchain, mint)
 
 
 @tool(annotations=READ_ONLY, structured_output=True)
@@ -654,9 +670,11 @@ async def get_token_holders(blockchain: ChainArg, mint: MintArg,
     """
     if bad := _check_type(blockchain, wallet_type or None):
         return bad
-    return await _request("GET", "/v1/tokens/holders", ctx,
-                          {"blockchain": blockchain, "mint": mint,
-                           "type": wallet_type, "limit": limit})
+    return _with_trade_url(
+        await _request("GET", "/v1/tokens/holders", ctx,
+                       {"blockchain": blockchain, "mint": mint,
+                        "type": wallet_type, "limit": limit}),
+        blockchain, mint)
 
 
 @tool(annotations=READ_ONLY, structured_output=True)
@@ -676,9 +694,11 @@ async def get_token_transactions(blockchain: ChainArg, mint: MintArg,
     """
     if bad := _check_type(blockchain, wallet_type or None):
         return bad
-    return await _request("GET", "/v1/tokens/transactions", ctx,
-                          {"blockchain": blockchain, "mint": mint,
-                           "type": wallet_type, "limit": limit})
+    return _with_trade_url(
+        await _request("GET", "/v1/tokens/transactions", ctx,
+                       {"blockchain": blockchain, "mint": mint,
+                        "type": wallet_type, "limit": limit}),
+        blockchain, mint)
 
 
 @tool(annotations=READ_ONLY, structured_output=True)
@@ -730,8 +750,10 @@ async def detect_bundles(
 
     mint: the Solana token mint address
     """
-    return await _request("GET", "/v1/bundle", ctx,
-                          {"blockchain": "solana", "mint": mint}, max_items=10)
+    return _with_trade_url(
+        await _request("GET", "/v1/bundle", ctx,
+                       {"blockchain": "solana", "mint": mint}, max_items=10),
+        "solana", mint)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
