@@ -12,8 +12,9 @@
 # AUTH (per user): every user supplies their own CabalSpy key, sent by the MCP
 # client as an HTTP header:
 #       X-CabalSpy-Key: <key>
-#   (Fallback: CABALSPY_API_KEY in the environment, for single-user or demo use.)
-# Users without a key get the dashboard and pricing links from `get_started`.
+#   (Fallback: CABALSPY_API_KEY in the environment, for single-user use.)
+# Users without a key run on the public demo key (20 requests per IP per day,
+# data 15 minutes delayed); `get_started` has the links to a free test key.
 #
 # Transport: Streamable HTTP, behind nginx for TLS.
 #
@@ -45,6 +46,10 @@ except ImportError:  # older mcp releases
 
 API_BASE = os.environ.get("CABALSPY_API_BASE", "https://api.cabalspy.xyz")
 ENV_KEY = os.environ.get("CABALSPY_API_KEY", "")  # fallback for demo/single user
+#: Used when a caller brings no key at all, so an agent can try every tool before
+#: anyone signs up. The API applies the demo rules: 20 requests per IP per day,
+#: events delayed 15 minutes, at most 5 rows per list.
+DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
 TIMEOUT = 30.0
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
@@ -89,8 +94,11 @@ mcp = FastMCP(
         "The tools cover wallets, tokens, the live trade feed, cluster signals, aggregate "
         "analytics and Jito bundle detection.\n\n"
         "Each user supplies their own CabalSpy API key, either through the 'X-CabalSpy-Key' "
-        "header or as an 'api_key' query parameter on the connection URL. If a tool returns "
-        "an auth error, call 'get_started' for a free test key.\n\n"
+        "header or as an 'api_key' query parameter on the connection URL. Without a key the "
+        "tools still work on the public demo: 20 requests per IP per day, data delayed 15 "
+        "minutes, at most 5 rows per list. Demo results carry a 'demo' block; say so when "
+        "you present them, because they are not live. If a tool returns an auth error or "
+        "'demo_limit_reached', call 'get_started' for a free test key.\n\n"
         "Three things worth knowing before interpreting results:\n"
         "1. Market cap, price and unrealized PnL are returned for Solana only. On bnb, base, "
         "eth and rh those fields are null by design; realized PnL, invested amounts and "
@@ -178,7 +186,8 @@ def _resolve_key(ctx: Context | None) -> str:
        because some clients, claude.ai's web connector among them, offer no way
        to set a custom header and expect OAuth instead. A query parameter is the
        only channel left there.
-    3. The environment, for single-user or demo deployments.
+    3. The environment, for single-user deployments.
+    4. The public demo key, so a caller without a key can still try every tool.
 
     The query parameter is a deliberate compromise, not an oversight: the key
     will appear in the reverse proxy's access log. Keep those logs short, and
@@ -196,16 +205,36 @@ def _resolve_key(ctx: Context | None) -> str:
                     return value.strip()
     except Exception:
         pass
-    return ENV_KEY
+    return ENV_KEY or DEMO_KEY
 
 
-_NO_KEY = {
-    "error": "missing_api_key",
+def _caller_ip(ctx: Context | None) -> str | None:
+    """The end user's IP, as nginx in front of this server saw it.
+
+    Every call to the API comes from this server, so without it all demo users
+    would share one daily budget. The API only believes this header from a
+    local connection, which is why CABALSPY_API_BASE points at 127.0.0.1 in
+    production.
+    """
+    try:
+        req = ctx.request_context.request if ctx else None
+        if req is not None:
+            ip = req.headers.get("x-real-ip") or req.headers.get("x-forwarded-for", "").split(",")[0]
+            if ip and ip.strip():
+                return ip.strip()
+            if req.client:
+                return req.client.host
+    except Exception:
+        pass
+    return None
+
+
+_DEMO_LIMIT = {
+    "error": "demo_limit_reached",
     "message": (
-        "No CabalSpy API key provided. Either set the 'X-CabalSpy-Key' header in your MCP "
-        "client config, or append ?api_key=<your-key> to the connection URL if your client "
-        "cannot send custom headers. A free test key with 1000 requests is available — "
-        "call 'get_started'."
+        "The public demo allows 20 requests per IP per day. Get a free test key with 1000 "
+        "real-time requests at no cost, then set it as 'X-CabalSpy-Key' — call "
+        "'get_started' for the details."
     ),
     "get_test_key": DASHBOARD_URL,
     "pricing": PRICING_URL,
@@ -232,8 +261,6 @@ async def _request(
 ) -> dict:
     """Calls a v1 endpoint with the user's key and trims the result."""
     key = _resolve_key(ctx)
-    if not key:
-        return _NO_KEY
 
     clean = {k: v for k, v in (params or {}).items() if v not in (None, "")}
     # The key goes in the Authorization header, not the query string: query
@@ -241,8 +268,11 @@ async def _request(
     headers = {
         "Authorization": f"Bearer {key}",
         "Accept": "application/json",
-        "User-Agent": "cabalspy-mcp/2.0",
+        "User-Agent": "cabalspy-mcp/2.2",
     }
+    caller_ip = _caller_ip(ctx)
+    if caller_ip:
+        headers["X-Real-IP"] = caller_ip
 
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -274,6 +304,11 @@ async def _request(
             ),
         }
     if r.status_code == 429:
+        try:
+            if r.json().get("error", {}).get("code") == "demo_limit_reached":
+                return _DEMO_LIMIT
+        except Exception:
+            pass
         return {"error": "rate_limited",
                 "message": "Rate limit reached. Wait a moment before retrying.",
                 "retry_after_seconds": r.headers.get("Retry-After")}
@@ -298,6 +333,13 @@ async def _request(
     result = _compact(data, max_items)
     if isinstance(result, dict) and isinstance(payload.get("pagination"), dict):
         result["pagination"] = payload["pagination"]
+    # Demo data is 15 minutes old and capped at 5 rows. The model has to know,
+    # or it presents a delayed excerpt as the live picture.
+    if isinstance(payload.get("demo"), dict):
+        if isinstance(result, dict):
+            result["demo"] = payload["demo"]
+        else:
+            result = {"data": result, "demo": payload["demo"]}
     return result
 
 
@@ -371,9 +413,10 @@ HoursArg = Annotated[int, Field(ge=1, le=24, description=(
 @tool(annotations=READ_ONLY, structured_output=True)
 async def get_started() -> dict[str, Any]:
     """
-    How to use CabalSpy: where to get a free API key (1000 requests, no cost),
-    pricing, documentation, and what the data covers. Call this first if you do
-    not have a key yet, or if another tool returned an auth error.
+    How to use CabalSpy: the keyless demo, where to get a free API key (1000
+    requests, no cost), pricing, documentation, and what the data covers. Call
+    this first if you do not have a key yet, or if another tool returned an auth
+    error or 'demo_limit_reached'.
     """
     return {
         "what_is_cabalspy": (
@@ -381,6 +424,15 @@ async def get_started() -> dict[str, Any]:
             "Solana, BNB Chain, Base, Ethereum and Robinhood Chain, with realized PnL, win "
             "rates, lifetime history, live holdings, cluster signals and Jito bundle detection."
         ),
+        "demo": {
+            "details": (
+                "Every tool works without a key on the public demo: 20 requests per IP per "
+                "day, data delayed 15 minutes, at most 5 rows per list. Results then carry a "
+                "'demo' block. For live data and more requests, use a free test key."
+            ),
+            "rest": "https://demo-api.cabalspy.xyz/v1/wallets?blockchain=solana&type=kol",
+            "websocket": "wss://demo-api.cabalspy.xyz/ws",
+        },
         "free_test_key": {"url": DASHBOARD_URL,
                           "details": "Create a free test key with 1000 requests at no cost."},
         "pricing": PRICING_URL,

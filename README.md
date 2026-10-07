@@ -21,7 +21,7 @@ Powering labeled-wallet data inside Axiom, Trojan, o1.exchange and 20+ other tra
 
 - **Remote endpoint:** `https://mcp.cabalspy.xyz/mcp`
 - **Transport:** Streamable HTTP
-- **Auth:** per-user API key via the `X-CabalSpy-Key` header
+- **Auth:** per-user API key via the `X-CabalSpy-Key` header — or none at all, see [Try it without a key](#try-it-without-a-key)
 - **Free test key:** 1000 requests at [apidashboard.cabalspy.xyz](https://apidashboard.cabalspy.xyz/)
 - **Pricing:** [cabalspy.xyz/pricing](https://www.cabalspy.xyz/pricing/)
 - **Website:** [cabalspy.xyz/mcp](https://www.cabalspy.xyz/mcp/) — setup guide for Claude, Cursor and VS Code
@@ -105,7 +105,7 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 ### Onboarding
 | Tool | What it does |
 |---|---|
-| `get_started` | Free key, pricing, coverage and the data caveats |
+| `get_started` | Keyless demo, free key, pricing, coverage and the data caveats |
 | `get_api_status` | Health and what the API currently covers |
 
 ## Questions it answers
@@ -116,6 +116,16 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 - *"Who is still holding this token, and who already sold?"*
 - *"Which wallets trade similar tokens to this address?"*
 - *"Compare these five wallets over 30 days."*
+
+## Try it without a key
+
+Connect to `https://mcp.cabalspy.xyz/mcp` with no key and every tool still works, on the public demo:
+
+- 20 requests per IP per day (shared with the demo REST API and WebSocket)
+- data delayed 15 minutes, at most 5 rows per list
+- every result carries a `demo` block, so the model knows the data is not live
+
+When the 20 are used up, tools return `demo_limit_reached`. A [free test key](https://apidashboard.cabalspy.xyz/) gives 1000 real-time requests; set it as shown below and the limits go away.
 
 ## Connecting
 
