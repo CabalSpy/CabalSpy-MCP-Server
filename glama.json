@@ -10,7 +10,7 @@
         "api_key": {
           "type": "string",
           "title": "CabalSpy API key",
-          "description": "Optional. Without it the server still answers get_started and get_api_status. Free key with 1000 requests at https://apidashboard.cabalspy.xyz/",
+          "description": "Optional. Without it every CabalSpy tool runs on the public demo (and csid_profile, csid_wallet_owner, csid_kols on sandbox identities). Free key with 1000 requests at https://apidashboard.cabalspy.xyz/ ; the CabalSpy ID theses and leaderboard tools also need a CabalSpy ID instance.",
           "format": "password"
         }
       },

@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY cabalspy_mcp.py .
+COPY MCP_server.py cabalspy_mcp.py
 
 # Bind to every interface inside the container; put a TLS terminating proxy in
 # front of it in production.
