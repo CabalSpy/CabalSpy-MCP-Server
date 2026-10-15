@@ -1,7 +1,7 @@
 {
   "name": "cabalspy-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for the CabalSpy API \u2014 query KOL, smart money and whale wallet activity on Solana, Base, BNB Chain, Ethereum and Robinhood Chain from Claude, Cursor and other AI assistants.",
+  "version": "2.3.0",
+  "description": "MCP server for the CabalSpy API \u2014 query KOL, smart money and whale wallet activity on Solana, Base, BNB Chain, Ethereum and Robinhood Chain from Claude, Cursor and other AI assistants, plus CabalSpy ID (SocialFi): verified trader identities, wallet owners and token theses by holders.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -23,7 +23,12 @@
     "bnb",
     "ethereum",
     "robinhood-chain",
-    "ai-agent"
+    "ai-agent",
+    "cabalspy-id",
+    "socialfi",
+    "socialfi-api",
+    "wallet-verification",
+    "token-sentiment"
   ],
   "license": "MIT",
   "homepage": "https://www.cabalspy.xyz/mcp/",

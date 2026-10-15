@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.3.0 — 2026-10-15
+
+- **CabalSpy ID (SocialFi) tools**, all read-only:
+  - `csid_profile` — verified identity by X handle, CSID id, X id or wallet: X account, Telegram, KOL badge, verified wallets per chain, 7-day activity.
+  - `csid_wallet_owner` — who proved ownership of 1 to 100 wallets, or `verified: false`.
+  - `csid_kols` — KOLs with a reviewed CabalSpy ID badge, per chain.
+  - `csid_token_theses` — bull/bear summary and theses for one token, each with the author's live position and PnL; `sort`, `stance`, `scope`, cursor.
+  - `csid_latest_theses`, `csid_user_theses`, `csid_thesis` (with replies).
+  - `csid_leaderboard` — your instance's verified traders ranked (every CabalSpy ID user on Enterprise).
+- Identity tools work on the keyless demo with sandbox identities only. Theses and the leaderboard use the CabalSpy ID Data API (`api-id.cabalspy.xyz`, same key) and need a CabalSpy ID instance; without one they answer `csid_setup_required` / `no_instance` with the setup link.
+- Optional `instance` argument, or `X-CSID-Instance` header / `csid_instance` query parameter, for accounts with several instances.
+- Ethereum smart money: `eth` now accepts `smart` like the other EVM chains (already live since 2026-10-15).
+- New setting `CSID_API_BASE`. User-Agent carries the server version.
+- Dockerfile copies `MCP_server.py` (it referenced a file that is not in the repository).
+- Offline tests in `tests/` (`pytest`).
+
 ## 2.2.0 — 2026-10-07
 
 - Works without a key. A caller with no `X-CabalSpy-Key` now runs on the public demo key instead of getting `missing_api_key`: 20 requests per IP per day, data delayed 15 minutes, at most 5 rows per list.

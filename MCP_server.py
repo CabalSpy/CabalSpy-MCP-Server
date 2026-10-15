@@ -3,8 +3,9 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # CabalSpy MCP server — mcp.cabalspy.xyz
 #
-# Wraps the CabalSpy /v1 API as MCP tools so AI assistants (Claude, Cursor, and
-# anything else that speaks MCP) can query live wallet data in plain language.
+# Wraps the CabalSpy /v1 API and the CabalSpy ID (CSID) APIs as MCP tools so AI
+# assistants (Claude, Cursor, and anything else that speaks MCP) can query live
+# wallet data, verified trader identities and token theses in plain language.
 #
 # This server only calls the existing REST API. It contains no business logic of
 # its own; it is a thin, careful client in front of it.
@@ -50,24 +51,35 @@ ENV_KEY = os.environ.get("CABALSPY_API_KEY", "")  # fallback for demo/single use
 #: anyone signs up. The API applies the demo rules: 20 requests per IP per day,
 #: events delayed 15 minutes, at most 5 rows per list.
 DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
+#: The CabalSpy ID Data API (theses, CSID leaderboards). Same API key as the
+#: CabalSpy API; the key's account needs a CabalSpy ID instance.
+CSID_API_BASE = os.environ.get("CSID_API_BASE", "https://api-id.cabalspy.xyz")
 TIMEOUT = 30.0
+VERSION = "2.3.0"
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
 DOCS_URL = "https://docs.cabalspy.xyz"
 WEBSITE_URL = "https://www.cabalspy.xyz/mcp/"
 TERMINAL_URL = "https://app.cabalspy.xyz/"
+CSID_URL = "https://id.cabalspy.xyz/"
+CSID_SETUP_URL = "https://apidashboard.cabalspy.xyz/csid"
+CSID_DOCS_URL = "https://docs.cabalspy.xyz/cabalspy-id"
+
+#: Set by the tests to an httpx.MockTransport; None in production.
+_TRANSPORT = None
 
 CHAINS = ["solana", "bnb", "base", "eth", "rh"]
 WALLET_TYPES_BY_CHAIN = {
     "solana": ["kol", "smart", "whale"],
     "bnb": ["kol", "smart"],
     "base": ["kol", "smart"],
-    "eth": ["kol"],
+    "eth": ["kol", "smart"],
     "rh": ["kol", "smart"],
 }
 
-#: Every tool here only reads; the API has no write endpoints. Falls back to a
+#: Every tool here only reads (posting theses needs Login with CabalSpy ID and is
+#: not offered here). Falls back to a
 #: plain dict, and finally to None, so an older mcp release cannot break startup.
 if ToolAnnotations is not None:
     READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
@@ -110,7 +122,17 @@ mcp = FastMCP(
         "omitted, they were — narrow the query rather than assuming you saw everything.\n"
         "4. Results for a single Solana token carry a 'trade_url': the token page in the "
         "CabalSpy Terminal, where the token can be traded with the same wallet data. Offer it "
-        "when the user wants to act on a token."
+        "when the user wants to act on a token.\n\n"
+        "CabalSpy ID (CSID), the SocialFi layer: the 'csid_' tools cover verified trader "
+        "identities (X account, KOL badge, wallets proven by an on-chain payment), wallet "
+        "owners, and token theses — short bull or bear posts by people who hold the token in "
+        "a verified wallet, with their live position and PnL. Use csid_profile or "
+        "csid_wallet_owner for 'who is this', csid_token_theses for 'what do holders think "
+        "about this token'. csid_profile, csid_wallet_owner and csid_kols work on the demo "
+        "with sandbox identities only (marked 'sandbox': true; never present them as real "
+        "people). The theses and leaderboard tools need the user's own CabalSpy API key with a "
+        "CabalSpy ID instance; if they return 'csid_setup_required' or 'no_instance', pass on "
+        "the setup link."
     ),
 )
 
@@ -251,6 +273,114 @@ _AUTH_FAILED = {
 }
 
 
+#: CabalSpy ID errors that mean "set up CabalSpy ID first", not "bad key".
+_CSID_SETUP_CODES = {"product_not_enabled", "no_instance", "instance_required",
+                     "instance_not_found", "instance_forbidden"}
+#: 403s that are about what the key may see, not about the key itself. Every
+#: other 401/403 (invalid key, no credits) keeps the usual auth answer.
+_CSID_PASS_403 = _CSID_SETUP_CODES | {"scope_not_allowed", "plan_user_limit"}
+
+
+def _csid_error(code: str, message: str, status: int) -> dict:
+    """Shapes a CabalSpy ID error so the model can act on it."""
+    out = {"error": code or f"http_{status}", "message": message}
+    if code in _CSID_SETUP_CODES:
+        out["setup_url"] = CSID_SETUP_URL
+        out["hint"] = (
+            "In the CabalSpy API dashboard, open CabalSpy ID, create an instance (free plan "
+            "available) and enable the key for CabalSpy ID. With several instances, pass "
+            "'instance' (the instance's client_id)."
+        )
+    return out
+
+
+async def _call(
+    method: str,
+    path: str,
+    ctx: Context | None,
+    params: dict | None = None,
+    body: dict | None = None,
+    base: str | None = None,
+    csid: bool = False,
+) -> tuple[dict | None, dict | None]:
+    """Calls an endpoint with the user's key. Returns (payload, None) on success
+    and (None, error) otherwise. csid=True passes CabalSpy ID errors through
+    instead of the CabalSpy API's generic wording."""
+    key = _resolve_key(ctx)
+
+    clean = {k: v for k, v in (params or {}).items() if v not in (None, "")}
+    # The key goes in the Authorization header, not the query string: query
+    # parameters end up in nginx access logs, proxy logs and browser history.
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+        "User-Agent": f"cabalspy-mcp/{VERSION}",
+    }
+    base = base or API_BASE
+    caller_ip = _caller_ip(ctx)
+    if caller_ip and base == API_BASE:
+        headers["X-Real-IP"] = caller_ip
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT, transport=_TRANSPORT) as client:
+            if method == "POST":
+                r = await client.post(f"{base}{path}", json=body, headers=headers)
+            else:
+                r = await client.get(f"{base}{path}", params=clean, headers=headers)
+    except httpx.TimeoutException:
+        return None, {"error": "timeout", "message": f"CabalSpy did not respond within {TIMEOUT:.0f}s."}
+    except Exception as exc:
+        return None, {"error": "request_failed", "detail": str(exc)[:200]}
+
+    try:
+        err = r.json().get("error", {}) if r.status_code >= 400 else {}
+        if not isinstance(err, dict):
+            err = {}
+    except Exception:
+        err = {}
+    code = err.get("code", "")
+
+    if code == "demo_limit_reached":
+        return None, _DEMO_LIMIT
+    if csid and code and (r.status_code in (400, 404) or
+                          (r.status_code == 403 and code in _CSID_PASS_403)):
+        return None, _csid_error(code, err.get("message", ""), r.status_code)
+
+    if r.status_code in (401, 403):
+        if code == "insufficient_credits":
+            return None, {**_AUTH_FAILED, "error": "insufficient_credits",
+                          "message": "This CabalSpy API key has no credits left. Top up or upgrade."}
+        return None, _AUTH_FAILED
+
+    if r.status_code == 404:
+        return None, {
+            "error": "not_found",
+            "message": (
+                "Not tracked by CabalSpy. This is not the same as the wallet or token not "
+                "existing onchain — CabalSpy only covers labeled wallets."
+            ),
+        }
+    if r.status_code == 429:
+        return None, {"error": "rate_limited",
+                      "message": "Rate limit reached. Wait a moment before retrying.",
+                      "retry_after_seconds": r.headers.get("Retry-After")}
+    if r.status_code >= 400:
+        return None, {
+            "error": code or f"http_{r.status_code}",
+            "message": err.get("message", r.text[:300]),
+            "parameter": err.get("parameter"),
+            "allowed": err.get("allowed"),
+        }
+
+    try:
+        payload = r.json()
+    except Exception:
+        return None, {"error": "bad_response", "detail": r.text[:300]}
+    if not isinstance(payload, dict):
+        payload = {"data": payload}
+    return payload, None
+
+
 async def _request(
     method: str,
     path: str,
@@ -260,74 +390,9 @@ async def _request(
     max_items: int = DEFAULT_MAX_ITEMS,
 ) -> dict:
     """Calls a v1 endpoint with the user's key and trims the result."""
-    key = _resolve_key(ctx)
-
-    clean = {k: v for k, v in (params or {}).items() if v not in (None, "")}
-    # The key goes in the Authorization header, not the query string: query
-    # parameters end up in nginx access logs, proxy logs and browser history.
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Accept": "application/json",
-        "User-Agent": "cabalspy-mcp/2.2",
-    }
-    caller_ip = _caller_ip(ctx)
-    if caller_ip:
-        headers["X-Real-IP"] = caller_ip
-
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            if method == "POST":
-                r = await client.post(f"{API_BASE}{path}", json=body, headers=headers)
-            else:
-                r = await client.get(f"{API_BASE}{path}", params=clean, headers=headers)
-    except httpx.TimeoutException:
-        return {"error": "timeout", "message": f"CabalSpy did not respond within {TIMEOUT:.0f}s."}
-    except Exception as exc:
-        return {"error": "request_failed", "detail": str(exc)[:200]}
-
-    if r.status_code in (401, 403):
-        try:
-            code = r.json().get("error", {}).get("code", "")
-        except Exception:
-            code = ""
-        if code == "insufficient_credits":
-            return {**_AUTH_FAILED, "error": "insufficient_credits",
-                    "message": "This CabalSpy API key has no credits left. Top up or upgrade."}
-        return _AUTH_FAILED
-
-    if r.status_code == 404:
-        return {
-            "error": "not_found",
-            "message": (
-                "Not tracked by CabalSpy. This is not the same as the wallet or token not "
-                "existing onchain — CabalSpy only covers labeled wallets."
-            ),
-        }
-    if r.status_code == 429:
-        try:
-            if r.json().get("error", {}).get("code") == "demo_limit_reached":
-                return _DEMO_LIMIT
-        except Exception:
-            pass
-        return {"error": "rate_limited",
-                "message": "Rate limit reached. Wait a moment before retrying.",
-                "retry_after_seconds": r.headers.get("Retry-After")}
-    if r.status_code >= 400:
-        try:
-            err = r.json().get("error", {})
-        except Exception:
-            err = {}
-        return {
-            "error": err.get("code", f"http_{r.status_code}"),
-            "message": err.get("message", r.text[:300]),
-            "parameter": err.get("parameter"),
-            "allowed": err.get("allowed"),
-        }
-
-    try:
-        payload = r.json()
-    except Exception:
-        return {"error": "bad_response", "detail": r.text[:300]}
+    payload, error = await _call(method, path, ctx, params, body)
+    if error:
+        return error
 
     data = payload.get("data", payload)
     result = _compact(data, max_items)
@@ -369,7 +434,7 @@ def _check_type(chain: str, wallet_type: str | None) -> dict | None:
 
 ChainArg = Annotated[str, Field(description=(
     "Blockchain. One of: solana, bnb, base, eth, rh. solana has kol, smart and whale "
-    "wallets; bnb, base and rh have kol and smart; eth has kol only. rh is Robinhood "
+    "wallets; bnb, base, eth and rh have kol and smart. rh is Robinhood "
     "Chain, an Ethereum L2."
 ))]
 WalletTypeArg = Annotated[str, Field(description=(
@@ -457,7 +522,35 @@ async def get_started() -> dict[str, Any]:
             "What are KOLs buying right now?",
             "Was this token launch bundled?",
             "Who is still holding this token and who already sold?",
+            "What do verified holders think about $BONK?",
+            "Who owns this wallet?",
         ],
+        "cabalspy_id": {
+            "what": (
+                "CabalSpy ID (CSID) is the SocialFi layer for trading platforms: traders sign in "
+                "with X, Telegram or Google, verify their wallets with an on-chain payment, and "
+                "every trade feeds leaderboards, profiles, KOL badges and token theses (bull or "
+                "bear posts that only holders can write, with their live PnL)."
+            ),
+            "tools": {
+                "csid_profile": "who is this trader (handle, id or wallet)",
+                "csid_wallet_owner": "who verified this wallet (1-100 addresses)",
+                "csid_kols": "verified KOLs, per chain",
+                "csid_token_theses": "holder sentiment and theses for one token",
+                "csid_latest_theses": "newest theses across tokens",
+                "csid_user_theses": "theses of one person",
+                "csid_thesis": "one thesis with replies",
+                "csid_leaderboard": "your instance's verified traders ranked",
+            },
+            "demo": (
+                "csid_profile, csid_wallet_owner and csid_kols work without a key on sandbox "
+                "identities (e.g. username 'csid_sandbox_kol'). Theses and the leaderboard "
+                "need your own key with a CabalSpy ID instance."
+            ),
+            "setup": CSID_SETUP_URL,
+            "docs": CSID_DOCS_URL,
+            "website": CSID_URL,
+        },
         "data_caveats": {
             "market_cap": "Returned for Solana only. Null on bnb, base, eth and rh.",
             "realized_pnl": (
@@ -534,7 +627,7 @@ async def get_leaderboard(blockchain: ChainArg, wallet_type: WalletTypeArg = "ko
     Use for "best Solana KOLs today", "top whales this week", and similar.
 
     blockchain: solana, bnb, base, eth or rh
-    wallet_type: kol, smart or whale. whale is Solana only, eth has kol only.
+    wallet_type: kol, smart or whale. whale is Solana only.
     period: 6h, 1d, 7d or 30d (default 1d)
     limit: how many wallets (default 20)
     """
@@ -905,10 +998,6 @@ async def get_signals(
     """
     if bad := _check_type(blockchain, wallet_type):
         return bad
-    if wallet_type == "smart" and blockchain == "eth":
-        return {"error": "invalid_parameter", "parameter": "wallet_type",
-                "message": "Smart money signals are not available on eth; it tracks kol only.",
-                "allowed": ["kol"]}
     params = {"blockchain": blockchain, "type": wallet_type, "mode": mode,
               "hours": hours, "limit": limit}
     if min_wallets:
@@ -982,6 +1071,603 @@ async def get_analytics(
     return await _request("GET", "/v1/analytics", ctx,
                           {"blockchain": blockchain, "type": wallet_type,
                            "mode": mode, "period": period, "limit": limit})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CABALSPY ID (CSID) — the SocialFi layer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# CabalSpy ID links a trader's X account (and Telegram) to the wallets they
+# proved with an on-chain payment, gives KOLs a reviewed badge, and lets
+# token holders post theses that carry their live position.
+#
+# Two APIs, one key:
+#   * CabalSpy API /v1/csid/*  — profiles, wallet owners, verified KOLs. Works
+#     on the keyless demo, answered from sandbox identities only.
+#   * CSID Data API (api-id)   — theses and CSID leaderboards. Needs the user's
+#     own key, enabled for CabalSpy ID, and a CabalSpy ID instance. No demo.
+# The APIs decide what a key may see; these tools never widen it.
+
+CSID_SORTS = ["volume", "pnl", "pnl_usd", "win_rate", "trades"]
+
+_CSID_NEEDS_KEY = {
+    "error": "csid_setup_required",
+    "message": (
+        "Theses and CabalSpy ID leaderboards come from the CabalSpy ID Data API, which has no "
+        "keyless demo. It needs your own CabalSpy API key (free) with CabalSpy ID enabled and a "
+        "CabalSpy ID instance (free plan available). Set the key as 'X-CabalSpy-Key'. "
+        "csid_profile, csid_wallet_owner and csid_kols work without a key on sandbox data."
+    ),
+    "setup_url": CSID_SETUP_URL,
+    "free_test_key": DASHBOARD_URL,
+    "docs": CSID_DOCS_URL,
+}
+
+
+def _has_own_key(ctx: Context | None) -> bool:
+    return _resolve_key(ctx) != DEMO_KEY
+
+
+def _resolve_instance(ctx: Context | None, explicit: str | None) -> str | None:
+    """The CabalSpy ID instance (client_id) to act as: the tool argument, else
+    an 'X-CSID-Instance' header or 'csid_instance' query parameter on the
+    connection URL. Only needed when the key's account has several instances."""
+    if explicit and explicit.strip():
+        return explicit.strip()[:64]
+    try:
+        req = ctx.request_context.request if ctx else None
+        if req is not None:
+            value = req.headers.get("x-csid-instance") or req.query_params.get("csid_instance")
+            if value and value.strip():
+                return value.strip()[:64]
+    except Exception:
+        pass
+    return None
+
+
+def _drop_empty(d: dict) -> dict:
+    return {k: v for k, v in d.items() if v not in (None, "", [], {})}
+
+
+def _chain_ids(chains: Any) -> list:
+    out = []
+    for c in chains or []:
+        out.append(c.get("id") if isinstance(c, dict) else c)
+    return out
+
+
+def _slim_wallet(w: dict) -> dict:
+    return _drop_empty({"address": w.get("address"), "chains": _chain_ids(w.get("chains")),
+                        "verified_at": w.get("verified_at")})
+
+
+def _slim_profile(p: Any, full: bool = True) -> Any:
+    """A CabalSpy ID profile without avatars and duplicate links."""
+    if not isinstance(p, dict):
+        return p
+    x = p.get("x") or {}
+    kol = p.get("kol") or {}
+    username = p.get("username")
+    out = {
+        "csid_id": p.get("csid_id"),
+        "username": username,
+        "name": p.get("name"),
+        "kol_badge": bool(kol.get("badge")),
+        "kol_since": kol.get("since"),
+        "x": _drop_empty({
+            "username": x.get("username") or username, "url": x.get("url") or p.get("twitter"),
+            "followers": x.get("followers"), "following": x.get("following"),
+            "verified": x.get("verified") or None, "account_created": x.get("created_at"),
+        }) if x else None,
+        "telegram": p.get("telegram"),
+        "website": p.get("website"),
+        "wallets": [_slim_wallet(w) for w in (p.get("wallets") or [])[:10]],
+        "trading_7d": p.get("onchain"),
+        "joined_at": p.get("joined_at"),
+        "profile_url": p.get("profile_url") or (
+            f"{CSID_URL}u/{username}" if username and not p.get("sandbox") else None),
+    }
+    if full:
+        out["bio"] = p.get("bio")
+        out["location"] = p.get("location")
+    if p.get("sandbox"):
+        out["sandbox"] = True
+    return _drop_empty(out) | {"kol_badge": out["kol_badge"]}
+
+
+def _with_demo(result: dict, payload: dict | None) -> dict:
+    if payload and isinstance(payload.get("demo"), dict):
+        result["demo"] = payload["demo"]
+        result["sandbox_note"] = (
+            "Demo mode: these are CabalSpy ID sandbox identities, not real people. "
+            "Use your own API key for real profiles."
+        )
+    return result
+
+
+def _slim_position(pos: Any) -> Any:
+    if not isinstance(pos, dict):
+        return None
+    if pos.get("private"):
+        return {"private": True, "note": "Holds the token; keeps trading details private."}
+    now = pos.get("now") or {}
+    at = pos.get("at_post") or {}
+    return _drop_empty({
+        "status": now.get("status"),
+        "tokens_held": now.get("tokens_held"),
+        "tokens_held_at_post": at.get("tokens_held"),
+        "invested_usd": now.get("invested_usd"),
+        "realized_usd": now.get("realized_usd"),
+        "holding_value_usd": now.get("holding_value_usd"),
+        "pnl_usd": now.get("pnl_usd"),
+        "pnl_percent": now.get("pnl_percent"),
+    }) or None
+
+
+def _slim_author(a: Any) -> dict:
+    a = a if isinstance(a, dict) else {}
+    return _drop_empty({"username": a.get("username"), "name": a.get("name"),
+                        "kol_badge": a.get("kol_badge") or None, "csid_id": a.get("csid_id")})
+
+
+def _slim_reply(r: dict, body_chars: int = 1000) -> dict:
+    body = r.get("body") or ""
+    return _drop_empty({
+        "id": r.get("id"), "author": _slim_author(r.get("author")),
+        "body": body if len(body) <= body_chars else body[:body_chars] + "…",
+        "likes": r.get("likes") or None, "created_at": r.get("created_at"),
+    })
+
+
+def _slim_thesis(t: Any, with_token: bool = False) -> Any:
+    if not isinstance(t, dict):
+        return t
+    out = {
+        "id": t.get("id"),
+        "stance": t.get("stance") or "neutral",
+        "body": t.get("body"),
+        "author": _slim_author(t.get("author")),
+        "position": _slim_position(t.get("position")),
+        "likes": t.get("likes"),
+        "replies": t.get("replies"),
+        "reactions": t.get("reactions") or None,
+        "via": t.get("via"),
+        "created_at": t.get("created_at"),
+    }
+    if with_token:
+        out["chain"] = t.get("chain")
+        out["mint"] = t.get("mint")
+    latest = t.get("latest_replies") or []
+    if latest:
+        out["latest_replies"] = [_slim_reply(r, 280) for r in latest[:3]]
+    return _drop_empty(out) | {"likes": out["likes"] or 0, "replies": out["replies"] or 0}
+
+
+def _next_cursor(payload: dict | None) -> str | None:
+    pag = (payload or {}).get("pagination") or {}
+    return pag.get("next_cursor") if isinstance(pag, dict) else None
+
+
+def _check_chain(chain: str, parameter: str = "blockchain") -> dict | None:
+    if chain not in CHAINS:
+        return {"error": "invalid_parameter", "parameter": parameter,
+                "message": f"Unknown blockchain '{chain}'.", "allowed": CHAINS}
+    return None
+
+
+def _check_choice(value: str, allowed: list, parameter: str) -> dict | None:
+    if value not in allowed:
+        return {"error": "invalid_parameter", "parameter": parameter,
+                "message": f"Invalid value '{value}' for {parameter}.", "allowed": allowed}
+    return None
+
+
+# ── Parameter types (CSID) ────────────────────────────────────────────────────
+
+CsidUsernameArg = Annotated[str, Field(description=(
+    "X (Twitter) handle of the person, with or without @, e.g. 'CabalSpySol'. "
+    "Pass exactly one of username, csid_id, x_id or address."
+))]
+CsidIdArg = Annotated[str, Field(description=(
+    "CabalSpy ID user id (a UUID, the 'sub' of a Login with CabalSpy ID token), e.g. "
+    "'123e4567-e89b-12d3-a456-426614174000'."
+))]
+XIdArg = Annotated[str, Field(description=(
+    "Numeric X user id, e.g. '1234567890123456789'. Survives handle changes."
+))]
+CsidAddressArg = Annotated[str, Field(description=(
+    "A wallet address (Solana base58 or 0x EVM). Returns the person who verified it."
+))]
+OptionalChainArg = Annotated[str, Field(description=(
+    "Restrict to one blockchain: solana, bnb, base, eth or rh. Leave empty for all."
+))]
+ThesisLimitArg = Annotated[int, Field(ge=1, le=25, description=(
+    "How many theses to return (1-25, default 10)."
+))]
+StanceArg = Annotated[str, Field(description=(
+    "Only bullish ('bull') or bearish ('bear') theses. Leave empty for all, including "
+    "neutral ones."
+))]
+ThesisSortArg = Annotated[str, Field(description=(
+    "'new' (newest first, default) or 'top' (most liked first)."
+))]
+ThesisScopeArg = Annotated[str, Field(description=(
+    "'global' (default): theses posted on every platform that uses CabalSpy ID. "
+    "'instance': only theses written on your own CabalSpy ID instance."
+))]
+InstanceArg = Annotated[str, Field(description=(
+    "Your CabalSpy ID instance (its client_id, e.g. 'csid_1a2b…'). Only needed when your "
+    "account has several instances. Leave empty otherwise."
+))]
+
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_profile(username: CsidUsernameArg = "", csid_id: CsidIdArg = "",
+                       x_id: XIdArg = "", address: CsidAddressArg = "",
+                       ctx: Context = None) -> dict[str, Any]:
+    """
+    CabalSpy ID profile of a crypto trader: X account (followers, age), Telegram,
+    KOL badge, the wallets they verified by an on-chain payment (per chain), and
+    7-day trading activity. Use it to check who someone is and whether a trader
+    really owns the wallets they claim, e.g. "Is @CabalSpySol verified?",
+    "Which wallets does this KOL trade with?".
+
+    Pass exactly one of: username (X handle), csid_id, x_id, or address (looks up
+    the owner of a wallet). Works on the keyless demo with sandbox identities only
+    (try username 'csid_sandbox_kol').
+    """
+    given = {k: v.strip() for k, v in
+             {"username": username, "csid_id": csid_id, "x_id": x_id, "address": address}.items()
+             if v and v.strip()}
+    if len(given) != 1:
+        return {"error": "invalid_parameter", "parameter": "username|csid_id|x_id|address",
+                "message": "Pass exactly one of: username, csid_id, x_id, address."}
+    if "address" in given:
+        return await _wallet_owner(given["address"], ctx)
+    params = {k: (v.lstrip("@") if k == "username" else v) for k, v in given.items()}
+    payload, error = await _call("GET", "/v1/csid/profile", ctx, params, csid=True)
+    if error:
+        if error.get("error") == "profile_not_found":
+            error["hint"] = ("This person has no CabalSpy ID (or not under this handle). "
+                             "For any labeled wallet, lookup_wallet may still know them.")
+        return error
+    return _with_demo(_slim_profile(payload.get("data")), payload)
+
+
+async def _wallet_owner(address: str, ctx: Context | None) -> dict:
+    payload, error = await _call("GET", "/v1/csid/wallet", ctx, {"address": address}, csid=True)
+    if error:
+        if error.get("error") == "wallet_not_found":
+            return {"address": address, "verified": False,
+                    "message": "No CabalSpy ID user has verified this wallet. It may still be a "
+                               "labeled wallet: try lookup_wallet."}
+        return error
+    d = payload.get("data") or {}
+    return _with_demo(_drop_empty({
+        "address": d.get("address", address), "verified": True,
+        "chains": _chain_ids(d.get("chains")), "verified_at": d.get("verified_at"),
+        "owner": _slim_profile(d.get("owner"), full=False),
+    }), payload)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_wallet_owner(
+    addresses: Annotated[str, Field(description=(
+        "One wallet address, or up to 100 separated by commas (Solana and EVM mixed), "
+        "e.g. 'HHTNJXn5zDoVtbnRpYVwr7tKmnMs94cMPsu8gK2aLG9X'."))],
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """
+    Who owns a wallet? Returns the CabalSpy ID user who proved ownership with an
+    on-chain payment (X handle, KOL badge, verified chains), or verified=false.
+    Use it when a user pastes an address and asks who is behind it — e.g. "Who
+    owns wallet X?" — and to find verified traders among a token's holders.
+    Complements lookup_wallet (CabalSpy's own wallet labels). Several addresses at
+    once count as one batch request.
+    """
+    items = [a.strip() for a in addresses.replace("\n", ",").replace(" ", ",").split(",") if a.strip()]
+    if not items:
+        return {"error": "missing_parameter", "parameter": "addresses",
+                "message": "Pass at least one wallet address."}
+    if len(items) > 100:
+        return {"error": "invalid_parameter", "parameter": "addresses",
+                "message": f"At most 100 addresses per call, got {len(items)}."}
+    if len(items) == 1:
+        return await _wallet_owner(items[0], ctx)
+    payload, error = await _call("POST", "/v1/csid/wallets/lookup", ctx,
+                                 body={"addresses": items}, csid=True)
+    if error:
+        return error
+    d = payload.get("data") or {}
+    results = []
+    for r in d.get("results") or []:
+        w = r.get("wallet") or {}
+        results.append(_drop_empty({
+            "address": r.get("address"), "verified": bool(r.get("verified")),
+            "error": r.get("error"), "chains": _chain_ids(w.get("chains")),
+            "owner": _slim_profile(w.get("owner"), full=False) if w.get("owner") else None,
+        }) | {"verified": bool(r.get("verified"))})
+    # Verified first: they are what the caller is looking for.
+    results.sort(key=lambda r: not r["verified"])
+    return _with_demo(_compact({"checked": d.get("count", len(items)),
+                                "verified": d.get("verified"), "results": results}, 25), payload)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_kols(chain: OptionalChainArg = "",
+                    limit: Annotated[int, Field(ge=1, le=50, description=(
+                        "How many KOLs to return (1-50, default 20)."))] = 20,
+                    cursor: CursorArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    KOLs with a verified CabalSpy ID badge (reviewed: real X account with reach,
+    wallets proven on-chain), newest badge first. Each entry has the X handle,
+    followers, verified wallets and 7-day activity. Use for "Which KOLs are
+    verified on Base?" or to get wallets of verified influencers. For performance
+    rankings of tracked KOL wallets use get_leaderboard instead.
+
+    chain: solana, bnb, base, eth or rh — only KOLs with a wallet verified there.
+    """
+    if chain and (bad := _check_chain(chain, "chain")):
+        return bad
+    payload, error = await _call("GET", "/v1/csid/kols", ctx,
+                                 {"chain": chain, "limit": limit, "cursor": cursor}, csid=True)
+    if error:
+        return error
+    d = payload.get("data") or {}
+    kols = [_slim_profile(k, full=False) for k in d.get("kols") or []]
+    return _with_demo(_compact(_drop_empty({"count": len(kols), "kols": kols,
+                                            "next_cursor": d.get("next_cursor")}) | {"count": len(kols)}),
+                      payload)
+
+
+# ── Theses ────────────────────────────────────────────────────────────────────
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_token_theses(blockchain: ChainArg, mint: MintArg,
+                            sort: ThesisSortArg = "new", stance: StanceArg = "",
+                            limit: ThesisLimitArg = 10, cursor: CursorArg = "",
+                            scope: ThesisScopeArg = "global", instance: InstanceArg = "",
+                            ctx: Context = None) -> dict[str, Any]:
+    """
+    What do verified holders think about a token? Returns the bull/bear summary
+    and the latest (or top) theses: short posts that only people holding the token
+    in a CabalSpy ID verified wallet can write, each with the author's live
+    position (holding or sold, invested, PnL). Use for "What do holders say about
+    $BONK?" or "Is sentiment on this token bullish?".
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    Example: blockchain='solana', mint='DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'.
+    Page with the returned next_cursor.
+    """
+    if bad := _check_chain(blockchain):
+        return bad
+    if (bad := _check_choice(sort, ["new", "top"], "sort")) or \
+            (stance and (bad := _check_choice(stance, ["bull", "bear"], "stance"))) or \
+            (bad := _check_choice(scope, ["global", "instance"], "scope")):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    inst = _resolve_instance(ctx, instance)
+    base_params = {"blockchain": blockchain, "mint": mint, "scope": scope, "instance": inst}
+    result: dict[str, Any] = {}
+    if not cursor:
+        summary, error = await _call("GET", "/v1/theses/summary", ctx, base_params,
+                                     base=CSID_API_BASE, csid=True)
+        if error:
+            return error
+        s = summary.get("data") or {}
+        tok = s.get("token") or {}
+        bull, bear = s.get("bull") or 0, s.get("bear") or 0
+        result["token"] = _drop_empty({"symbol": tok.get("symbol"), "name": tok.get("name"),
+                                       "price_usd": tok.get("price_usd")})
+        result["summary"] = {
+            "theses": s.get("theses", 0), "authors": s.get("authors", 0),
+            "bull": bull, "bear": bear,
+            "bull_percent": round(100 * bull / (bull + bear), 1) if bull + bear else None,
+        }
+    payload, error = await _call("GET", "/v1/theses", ctx,
+                                 base_params | {"sort": sort, "stance": stance, "limit": limit,
+                                                "cursor": cursor},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    items = payload.get("data") or []
+    result["theses"] = [_slim_thesis(t) for t in items]
+    if not items and not cursor:
+        result["note"] = ("No theses for this token yet. Holders can post one on any platform "
+                          f"with the CabalSpy ID thesis widget, or at {CSID_URL}try/thesis.")
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    return _with_trade_url(_compact(result), blockchain, mint)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_latest_theses(blockchain: OptionalChainArg = "", limit: ThesisLimitArg = 10,
+                             cursor: CursorArg = "",
+                             users: Annotated[str, Field(description=(
+                                 "'all' (default): every author. 'instance': only users of your "
+                                 "CabalSpy ID instance."))] = "all",
+                             scope: ThesisScopeArg = "global", instance: InstanceArg = "",
+                             ctx: Context = None) -> dict[str, Any]:
+    """
+    The newest theses across all tokens: a live feed of what verified holders are
+    posting, each with token, stance, author and position. Use for "What are
+    verified traders talking about right now?" or to discover tokens with fresh
+    conviction. For one token use csid_token_theses.
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if blockchain and (bad := _check_chain(blockchain)):
+        return bad
+    if (bad := _check_choice(users, ["all", "instance"], "users")) or \
+            (bad := _check_choice(scope, ["global", "instance"], "scope")):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/theses/latest", ctx,
+                                 {"blockchain": blockchain, "limit": limit, "cursor": cursor,
+                                  "users": users, "scope": scope,
+                                  "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    result = {"theses": [_slim_thesis(t, with_token=True) for t in payload.get("data") or []]}
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    return _compact(result)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_user_theses(username: Annotated[str, Field(description=(
+                               "X handle of the author, with or without @, e.g. 'CabalSpySol'. "
+                               "Pass username or csid_id."))] = "",
+                           csid_id: CsidIdArg = "", limit: ThesisLimitArg = 10,
+                           cursor: CursorArg = "", instance: InstanceArg = "",
+                           ctx: Context = None) -> dict[str, Any]:
+    """
+    All theses one CabalSpy ID user has posted, newest first, with token and the
+    position they hold. Use to judge a caller's track record: "What has
+    @CabalSpySol been bullish on, and did it work out?".
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if bool(username.strip()) == bool(csid_id.strip()):
+        return {"error": "invalid_parameter", "parameter": "username|csid_id",
+                "message": "Pass exactly one of: username, csid_id."}
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/theses/user", ctx,
+                                 {"username": username.strip().lstrip("@"), "csid_id": csid_id.strip(),
+                                  "limit": limit, "cursor": cursor,
+                                  "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    result = {"theses": [_slim_thesis(t, with_token=True) for t in payload.get("data") or []]}
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    return _compact(result)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_thesis(thesis_id: Annotated[str, Field(description=(
+                          "Thesis id (UUID) from another csid_ tool, e.g. "
+                          "'7d4436ac-c0ef-4655-995f-10b06af94f21'."))],
+                      replies_limit: Annotated[int, Field(ge=0, le=50, description=(
+                          "How many replies to include (0-50, default 20)."))] = 20,
+                      cursor: CursorArg = "", instance: InstanceArg = "",
+                      ctx: Context = None) -> dict[str, Any]:
+    """
+    One thesis in full with its discussion: body, stance, author, the author's
+    position, reactions and the replies (oldest first). Use after another csid_
+    tool when the user wants to read a thread. cursor pages through the replies.
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if not thesis_id.strip():
+        return {"error": "missing_parameter", "parameter": "thesis_id", "message": "Pass a thesis id."}
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    inst = _resolve_instance(ctx, instance)
+    result: dict[str, Any] = {}
+    if not cursor:
+        item, error = await _call("GET", "/v1/theses/item", ctx, {"id": thesis_id.strip(), "instance": inst},
+                                  base=CSID_API_BASE, csid=True)
+        if error:
+            return error
+        t = item.get("data") or {}
+        result["thesis"] = {k: v for k, v in _slim_thesis(t, with_token=True).items()
+                            if k != "latest_replies"}
+        if t.get("chain") == "solana" and t.get("mint"):
+            result["trade_url"] = f"{TERMINAL_URL}token/{t['mint']}"
+        if not t.get("replies") or not replies_limit:
+            result["replies"] = []
+            return _compact(result)
+    if not replies_limit:
+        return {"replies": []}
+    payload, error = await _call("GET", "/v1/theses/replies", ctx,
+                                 {"id": thesis_id.strip(), "limit": replies_limit, "cursor": cursor,
+                                  "instance": inst},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    result["replies"] = [_slim_reply(r) for r in payload.get("data") or []]
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    return _compact(result)
+
+
+# ── Leaderboard ───────────────────────────────────────────────────────────────
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_leaderboard(blockchain: ChainArg, period: PeriodArg = "7d",
+                           sort: Annotated[str, Field(description=(
+                               "volume (default), pnl (native currency), pnl_usd, win_rate or "
+                               "trades."))] = "volume",
+                           limit: Annotated[int, Field(ge=1, le=50, description=(
+                               "How many traders (1-50, default 10)."))] = 10,
+                           cursor: CursorArg = "",
+                           scope: Annotated[str, Field(description=(
+                               "'instance' (default): the users of your CabalSpy ID instance. "
+                               "'global': every CabalSpy ID user, Enterprise plan only."))] = "instance",
+                           instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    Ranking of CabalSpy ID verified traders by their tracked trades: volume,
+    realized PnL, win rate and trade count for a period. Covers the users of YOUR
+    CabalSpy ID instance (the people who signed in on your platform);
+    scope='global' ranks every CabalSpy ID user and needs the Enterprise plan.
+    Use for "Who are the best traders on my platform this week?". For KOLs and
+    smart money tracked by CabalSpy use get_leaderboard.
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if bad := _check_chain(blockchain):
+        return bad
+    if (bad := _check_choice(period, ["6h", "1d", "7d", "30d"], "period")) or \
+            (bad := _check_choice(sort, CSID_SORTS, "sort")) or \
+            (bad := _check_choice(scope, ["instance", "global"], "scope")):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/wallets/leaderboard", ctx,
+                                 {"blockchain": blockchain, "period": period, "sort": sort,
+                                  "limit": limit, "cursor": cursor, "scope": scope,
+                                  "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    d = payload.get("data") or {}
+    rows = []
+    for e in d.get("leaderboard") or []:
+        prof = e.get("profile") or {}
+        st = e.get("period_stats") or {}
+        wr = e.get("period_win_rate_distribution") or {}
+        rows.append(_drop_empty({
+            "rank": e.get("rank"), "wallet": e.get("wallet"),
+            "username": prof.get("username"), "name": prof.get("name"),
+            "kol": prof.get("kol") or None, "csid_id": prof.get("csid_id"),
+            "volume": st.get("total_volume"), "volume_usd": st.get("total_volume_usd"),
+            "realized_pnl": st.get("realized_pnl"), "realized_pnl_usd": st.get("realized_pnl_usd"),
+            "realized_pnl_percent": st.get("realized_pnl_percentage"),
+            "win_rate_percent": wr.get("win_rate_percentage"), "closed_positions": wr.get("closed_count"),
+            "trades": st.get("total_txn"),
+            "tokens": (e.get("period_history_tokens") or {}).get("total_tokens"),
+        }))
+    pag = d.get("pagination") or {}
+    result = {"blockchain": d.get("blockchain", blockchain), "period": d.get("period", period),
+              "scope": d.get("scope", scope), "sort": d.get("sort", sort),
+              "currency": d.get("currency"), "total": pag.get("total"), "leaderboard": rows}
+    if pag.get("next_cursor"):
+        result["next_cursor"] = pag["next_cursor"]
+    if not rows:
+        result["note"] = ("No verified traders with trades in this period"
+                          + (" on your instance yet." if result["scope"] == "instance" else "."))
+    return _compact(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

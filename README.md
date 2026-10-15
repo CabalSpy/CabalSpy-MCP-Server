@@ -1,10 +1,10 @@
-# CabalSpy MCP server — KOL and smart money wallet tracking for AI assistants
+# CabalSpy MCP server — KOL and smart money wallet tracking, plus CabalSpy ID (SocialFi), for AI assistants
 
 [![Smithery](https://img.shields.io/badge/Smithery-listed-blueviolet?style=flat-square)](https://smithery.ai/servers/cabalspy)
 [![Glama](https://img.shields.io/badge/Glama-listed-blue?style=flat-square)](https://glama.ai/mcp/servers/CabalSpy/CabalSpy-MCP-Server)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet?style=flat-square)](https://modelcontextprotocol.io/)
 [![Chains](https://img.shields.io/badge/chains-5-brightgreen?style=flat-square)](#chain-coverage)
-[![Tools](https://img.shields.io/badge/tools-21-brightgreen?style=flat-square)](#tools)
+[![Tools](https://img.shields.io/badge/tools-29-brightgreen?style=flat-square)](#tools)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy monitors labeled wallets — key opinion leaders (KOLs), smart money and whales — across **Solana, Base, BNB Chain, Ethereum and Robinhood Chain**, and exposes the data as Model Context Protocol tools.
@@ -12,6 +12,8 @@ Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy mon
 Connect it to Claude, Cursor, or any MCP client and ask about onchain trading activity in plain language. No code, no SDK, no integration work.
 
 **What people use it for:** vetting a KOL call before following it, checking whether a launch was bundled, finding which wallets accumulate together, building copy-trading shortlists, and answering "who is this address" in one line.
+
+**New in 2.3: CabalSpy ID, the SocialFi layer.** [CabalSpy ID](https://id.cabalspy.xyz/) links traders' X accounts to the wallets they proved on-chain, gives KOLs a reviewed badge, and lets token holders post theses that carry their live position and PnL. Eight `csid_` tools bring that into your assistant: *"What do verified holders think about $BONK?"*, *"Who owns this wallet?"*
 
 **The multichain one.** Most onchain KOL tooling is Solana only. CabalSpy tracks labeled wallets on
 five chains — Solana, Base, BNB Chain, Ethereum and Robinhood Chain — through one connection and one
@@ -69,7 +71,7 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 ## Tools
 
-21 tools covering the full v1 API. All read-only.
+29 tools: 21 covering the full CabalSpy v1 API and 8 for CabalSpy ID. All read-only.
 
 ### Wallets
 | Tool | What it does |
@@ -102,6 +104,20 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 | `get_signal_history` | Past signals for backtesting |
 | `get_analytics` | Volume trend, most traded, win rate, top performers |
 
+### CabalSpy ID (SocialFi)
+| Tool | What it does |
+|---|---|
+| `csid_profile` | Verified identity by X handle, CSID id, X id or wallet: X account, Telegram, KOL badge, verified wallets per chain, 7-day activity |
+| `csid_wallet_owner` | Who proved ownership of a wallet (1 to 100 addresses), or `verified: false` |
+| `csid_kols` | KOLs with a reviewed CabalSpy ID badge, per chain |
+| `csid_token_theses` | Holder sentiment for one token: bull/bear summary and theses with each author's live position and PnL |
+| `csid_latest_theses` | Newest theses across all tokens |
+| `csid_user_theses` | Every thesis one person posted |
+| `csid_thesis` | One thesis with its replies |
+| `csid_leaderboard` | Your instance's verified traders ranked by volume, PnL, win rate or trades (all CabalSpy ID users on Enterprise) |
+
+`csid_profile`, `csid_wallet_owner` and `csid_kols` use the CabalSpy API and work on the keyless demo with sandbox identities only (try `csid_sandbox_kol`). The theses and leaderboard tools use the [CabalSpy ID Data API](https://docs.cabalspy.xyz/cabalspy-id): they need your own key, enabled for CabalSpy ID, and a CabalSpy ID instance — create one (free plan available) at [apidashboard.cabalspy.xyz/csid](https://apidashboard.cabalspy.xyz/csid). Theses are global: every key reads the theses of every platform. If your account has several instances, pass `instance` (the client_id) or set an `X-CSID-Instance` header on the connection.
+
 ### Onboarding
 | Tool | What it does |
 |---|---|
@@ -116,10 +132,15 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 - *"Who is still holding this token, and who already sold?"*
 - *"Which wallets trade similar tokens to this address?"*
 - *"Compare these five wallets over 30 days."*
+- *"What do verified holders think about $BONK?"*
+- *"Who owns wallet HHTNJXn5zDoVtbnRpYVwr7tKmnMs94cMPsu8gK2aLG9X?"*
+- *"Is @CabalSpySol a verified trader, and which wallets does he use?"*
+- *"Which KOLs are verified on Base?"*
+- *"What are verified traders posting about right now?"*
 
 ## Try it without a key
 
-Connect to `https://mcp.cabalspy.xyz/mcp` with no key and every tool still works, on the public demo:
+Connect to `https://mcp.cabalspy.xyz/mcp` with no key and every CabalSpy tool still works, on the public demo (for CabalSpy ID: `csid_profile`, `csid_wallet_owner` and `csid_kols`, on sandbox identities):
 
 - 20 requests per IP per day (shared with the demo REST API and WebSocket)
 - data delayed 15 minutes, at most 5 rows per list
@@ -199,6 +220,9 @@ descriptions spell out how to read the numbers:
   tracked on several returns the first match; pass a chain to the other tools when you need a
   specific one.
 - **Bundle detection is Solana-native**, because it reads Jito bundles.
+- **Theses can only be written by holders.** Each one carries the author's position (holding or
+  sold, invested, PnL); `private` means the author holds the token but keeps trading details private.
+- **Demo identities are sandbox fixtures**, marked `sandbox: true`. They are never real people.
 
 ## Security
 
@@ -212,9 +236,9 @@ key appears in the reverse proxy's access log. Keep those logs short, and prefer
 every client that supports one.
 
 The key is never accepted as a tool argument, so a model can neither see it nor write it into a
-transcript. Every tool is annotated `readOnlyHint`; nothing in the CabalSpy API can modify state.
-
-Every tool is annotated `readOnlyHint`. Nothing in the CabalSpy API can modify state.
+transcript. Every tool is annotated `readOnlyHint`; none of them modifies state. The CabalSpy ID
+tools send the same key to the CabalSpy ID Data API (`api-id.cabalspy.xyz`); what a key may see
+(own instance, global on Enterprise) is decided there, not here.
 
 ## Self-hosting
 
@@ -225,7 +249,7 @@ docker build -t cabalspy-mcp .
 docker run -p 8081:8081 cabalspy-mcp
 ```
 
-Configuration and deployment are covered in [DEPLOYMENT.md](DEPLOYMENT.md).
+Settings: `CABALSPY_API_BASE` (default `https://api.cabalspy.xyz`), `CSID_API_BASE` (default `https://api-id.cabalspy.xyz`), `MCP_HOST`, `MCP_PORT`. The systemd unit in `cabalspy-mcp.service` shows a hardened setup.
 
 ## Contributing
 
@@ -257,7 +281,7 @@ No, and it should not. MCP is request and response; a model cannot read a feed w
 
 ### Do I need an API key?
 
-Yes, your own. A free test key with 1000 requests is at [apidashboard.cabalspy.xyz](https://apidashboard.cabalspy.xyz/). Call `get_started` from inside your assistant and it will hand you the links.
+Not to try it: the keyless demo covers every CabalSpy tool and the CabalSpy ID identity tools. For live data, use your own key: a free test key with 1000 requests is at [apidashboard.cabalspy.xyz](https://apidashboard.cabalspy.xyz/). The CabalSpy ID theses and leaderboard tools additionally need a CabalSpy ID instance on that account. Call `get_started` from inside your assistant and it will hand you the links.
 
 ## Also available as an SDK
 
@@ -267,14 +291,13 @@ If you are writing code rather than asking questions, the same API is available 
 
 | File | Purpose |
 |---|---|
-| `cabalspy_mcp.py` | the server |
-| `test_server.py` | offline test suite, no key or network needed |
+| `MCP_server.py` | the server (deployed as `cabalspy_mcp.py`) |
+| `tests/` | offline tests for the CabalSpy ID tools (`pytest`), no key or network needed |
 | `server.json` | MCP registry entry |
 | `glama.json` | Glama directory listing |
 | `smithery-config-schema.json` | config schema shown to Smithery users |
 | `Dockerfile` | self-hosting and directory sandboxes |
 | `cabalspy-mcp.service` | hardened systemd unit |
-| `DEPLOYMENT.md` | operations, for self-hosters |
 
 
 ## License
