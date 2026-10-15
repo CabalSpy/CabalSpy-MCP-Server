@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "xyz.cabalspy/wallet-tracker",
-  "description": "KOL and smart money tracking on 5 chains, plus CabalSpy ID: verified traders and holder theses.",
+  "description": "KOL and smart money tracking on 5 chains, plus CabalSpy ID (SocialFi): verified traders, theses.",
   "version": "2.3.0",
   "remotes": [
     {
