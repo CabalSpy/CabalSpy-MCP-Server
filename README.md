@@ -118,6 +118,18 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 `csid_profile`, `csid_wallet_owner` and `csid_kols` use the CabalSpy API and work on the keyless demo with sandbox identities only (try `csid_sandbox_kol`). The theses and leaderboard tools use the [CabalSpy ID Data API](https://docs.cabalspy.xyz/cabalspy-id): they need your own key, enabled for CabalSpy ID, and a CabalSpy ID instance — create one (free plan available) at [apidashboard.cabalspy.xyz/csid](https://apidashboard.cabalspy.xyz/csid). Theses are global: every key reads the theses of every platform. If your account has several instances, pass `instance` (the client_id) or set an `X-CSID-Instance` header on the connection.
 
+### White-label (your platform's own users)
+
+For platforms that keep their own login and import their users into a CabalSpy ID instance ([white-label](https://docs.cabalspy.xyz/cabalspy-id/white-label)). Users are addressed by your own user id (`external_id`). Read-only: creating, importing and deleting users stays in the Data API.
+
+| Tool | What it returns |
+|---|---|
+| `csid_platform_user` | One of your users by your own user id: wallets with their trust status, X/Telegram/KOL badge, trading stats per chain, latest trades |
+| `csid_platform_leaderboard` | Your platform's users ranked on one chain by PnL, volume, win rate or trades, each with your user id |
+| `csid_competitions` | Your trading competitions; with an id the rules, every rule change and the current standings |
+
+They need your own key and a CabalSpy ID instance, like the theses tools.
+
 ### Onboarding
 | Tool | What it does |
 |---|---|

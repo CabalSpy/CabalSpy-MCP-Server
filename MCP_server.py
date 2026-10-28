@@ -55,7 +55,7 @@ DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
 #: CabalSpy API; the key's account needs a CabalSpy ID instance.
 CSID_API_BASE = os.environ.get("CSID_API_BASE", "https://api-id.cabalspy.xyz")
 TIMEOUT = 30.0
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
@@ -132,7 +132,9 @@ mcp = FastMCP(
         "with sandbox identities only (marked 'sandbox': true; never present them as real "
         "people). The theses and leaderboard tools need the user's own CabalSpy API key with a "
         "CabalSpy ID instance; if they return 'csid_setup_required' or 'no_instance', pass on "
-        "the setup link."
+        "the setup link. Platforms that keep their own login (white-label) address their "
+        "imported users by their own user id: csid_platform_user, csid_platform_leaderboard "
+        "and csid_competitions."
     ),
 )
 
@@ -541,7 +543,16 @@ async def get_started() -> dict[str, Any]:
                 "csid_user_theses": "theses of one person",
                 "csid_thesis": "one thesis with replies",
                 "csid_leaderboard": "your instance's verified traders ranked",
+                "csid_platform_user": "white-label: one of your platform's users by your own user id",
+                "csid_platform_leaderboard": "white-label: your platform's users ranked",
+                "csid_competitions": "white-label: your trading competitions and standings",
             },
+            "white_label": (
+                "Platforms with their own login import their users and wallets into a CabalSpy "
+                "ID instance and get trades, PnL, leaderboards and trading competitions through "
+                "the Data API, without CabalSpy branding. Creating and importing users happens in "
+                "the Data API; these tools only read."
+            ),
             "demo": (
                 "csid_profile, csid_wallet_owner and csid_kols work without a key on sandbox "
                 "identities (e.g. username 'csid_sandbox_kol'). Theses and the leaderboard "
@@ -549,6 +560,7 @@ async def get_started() -> dict[str, Any]:
             ),
             "setup": CSID_SETUP_URL,
             "docs": CSID_DOCS_URL,
+            "white_label_docs": f"{CSID_DOCS_URL}/white-label",
             "website": CSID_URL,
         },
         "data_caveats": {
@@ -1667,6 +1679,200 @@ async def csid_leaderboard(blockchain: ChainArg, period: PeriodArg = "7d",
     if not rows:
         result["note"] = ("No verified traders with trades in this period"
                           + (" on your instance yet." if result["scope"] == "instance" else "."))
+    return _compact(result)
+
+
+# ── White-label: a platform's own users and competitions ─────────────────────
+#
+# Platforms that keep their own login import their users into a CabalSpy ID
+# instance and address them by their own user id (external_id). These tools
+# only read; creating, importing and deleting users stays in the Data API.
+
+CSID_WHITE_LABEL_DOCS_URL = f"{CSID_DOCS_URL}/white-label"
+COMPETITION_STATUSES = ["scheduled", "waiting", "running", "ended", "cancelled"]
+
+ExternalIdArg = Annotated[str, Field(description=(
+    "The user's id on YOUR platform (external_id), as you passed it when the user was "
+    "created or imported, e.g. 'did:privy:abc123' or '42'."
+))]
+
+
+def _slim_stats(s: dict) -> dict:
+    return _drop_empty({
+        "volume": s.get("total_volume"), "volume_usd": s.get("total_volume_usd"),
+        "realized_pnl": s.get("realized_pnl"), "realized_pnl_usd": s.get("realized_pnl_usd"),
+        "win_rate_percent": s.get("win_rate_percentage"), "closed_positions": s.get("closed_count"),
+        "trades": s.get("total_txn"), "tokens": s.get("tokens"),
+    })
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_platform_user(external_id: ExternalIdArg, period: PeriodArg = "7d",
+                             instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    One user of YOUR platform (white-label), looked up by your own user id: display
+    name, wallets with their trust status, X/Telegram/KOL badge, trading stats per
+    chain for the period (volume, realized PnL, win rate), the latest trades and
+    theses. Use for "How is user 42 on my platform doing this week?".
+
+    Only for platforms that import their users into a CabalSpy ID instance
+    (white-label). For CabalSpy ID users who signed in themselves use csid_profile.
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if not external_id.strip():
+        return {"error": "invalid_parameter", "parameter": "external_id",
+                "message": "Pass the user's id on your platform."}
+    if bad := _check_choice(period, ["6h", "1d", "7d", "30d"], "period"):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/platform-users/profile", ctx,
+                                 {"external_id": external_id.strip(), "period": period,
+                                  "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    p = payload.get("data") or {}
+    x = p.get("x") or {}
+    trading = [_drop_empty({"blockchain": t.get("blockchain"), "currency": t.get("currency"),
+                            **_slim_stats(t),
+                            "wallets": [_drop_empty({"address": w.get("address"), "verified": w.get("verified"),
+                                                     "volume_usd": w.get("total_volume_usd"),
+                                                     "realized_pnl_usd": w.get("realized_pnl_usd")})
+                                        for w in t.get("wallets") or []]})
+               for t in p.get("trading") or []]
+    return _compact(_drop_empty({
+        "external_id": p.get("external_id"), "csid_id": p.get("csid_id"),
+        "display_name": p.get("display_name"), "claimed": p.get("claimed") or None,
+        "x": x.get("username"), "telegram": (p.get("telegram") or {}).get("username"),
+        "kol": (p.get("kol") or {}).get("badge") or None,
+        "wallets": [_drop_empty({"address": w.get("address"), "family": w.get("family"),
+                                 "status": w.get("status"), "source": w.get("source")})
+                    for w in p.get("wallets") or []],
+        "period": p.get("period", period), "trading": trading,
+        "recent_trades": p.get("recent_trades"),
+        "theses": (p.get("theses") or {}).get("total"),
+        "created_at": p.get("created_at"),
+    }))
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_platform_leaderboard(blockchain: ChainArg, period: PeriodArg = "7d",
+                                    sort: Annotated[str, Field(description=(
+                                        "pnl_usd (default), pnl (native currency), volume, "
+                                        "win_rate or trades."))] = "pnl_usd",
+                                    limit: Annotated[int, Field(ge=1, le=50, description=(
+                                        "How many traders (1-50, default 10)."))] = 10,
+                                    cursor: CursorArg = "",
+                                    verified_only: Annotated[bool, Field(description=(
+                                        "True ranks only payment-verified wallets. The instance "
+                                        "setting leaderboard_trust can already enforce this."))] = False,
+                                    instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    Ranking of the users of YOUR platform (white-label) by their trades on one
+    chain: realized PnL, volume, win rate and trade count for a period, each entry
+    with your own user id (external_id). Use for "Who are the top traders on my
+    platform this week?" when your users are imported into a CabalSpy ID instance.
+    For users who sign in with CabalSpy ID themselves use csid_leaderboard.
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if bad := _check_chain(blockchain):
+        return bad
+    if (bad := _check_choice(period, ["6h", "1d", "7d", "30d"], "period")) or \
+            (bad := _check_choice(sort, CSID_SORTS, "sort")):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/platform-users/leaderboard", ctx,
+                                 {"blockchain": blockchain, "period": period, "sort": sort,
+                                  "limit": limit, "cursor": cursor,
+                                  "trust": "verified" if verified_only else "",
+                                  "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    d = payload.get("data") or {}
+    rows = []
+    for e in d.get("leaderboard") or []:
+        st = e.get("period_stats") or {}
+        wr = e.get("period_win_rate_distribution") or {}
+        rows.append(_drop_empty({
+            "rank": e.get("rank"), "external_id": e.get("external_id"), "wallet": e.get("wallet"),
+            "verified": e.get("verified"),
+            "volume": st.get("total_volume"), "volume_usd": st.get("total_volume_usd"),
+            "realized_pnl": st.get("realized_pnl"), "realized_pnl_usd": st.get("realized_pnl_usd"),
+            "win_rate_percent": wr.get("win_rate_percentage"), "closed_positions": wr.get("closed_count"),
+            "trades": st.get("total_txn"),
+        }))
+    result = {"blockchain": d.get("blockchain", blockchain), "period": d.get("period", period),
+              "sort": d.get("sort", sort), "trust": d.get("trust"), "currency": d.get("currency"),
+              "total": (payload.get("pagination") or {}).get("total"), "leaderboard": rows}
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    if not rows:
+        result["note"] = "None of your platform's users traded on this chain in this period."
+    return _compact(result)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_competitions(competition_id: Annotated[str, Field(description=(
+                                "A competition id from a previous call. Empty lists your "
+                                "competitions; set it for the rules and the standings."))] = "",
+                            status: Annotated[str, Field(description=(
+                                "When listing: scheduled, waiting, running, ended or cancelled. "
+                                "Empty lists all."))] = "",
+                            limit: Annotated[int, Field(ge=1, le=50, description=(
+                                "How many competitions or standings rows (1-50, default 10)."))] = 10,
+                            instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    Trading competitions of YOUR platform (white-label): without competition_id the
+    list (name, chain, metric, status, start and end, participants); with it the
+    rules, every rule change and the current standings with your own user ids
+    (standings are recomputed every 5 minutes, final once ended). Use for "Who is
+    leading the competition?" or "Which competitions are running?".
+
+    Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
+    """
+    if status and (bad := _check_choice(status, COMPETITION_STATUSES, "status")):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    inst = _resolve_instance(ctx, instance)
+    keep = ("id", "name", "chain", "metric", "status", "starts_at", "ends_at", "ended_at",
+            "participants", "min_participants", "max_participants", "min_trades",
+            "min_volume_usd", "wallet_trust", "enrollment", "late_join", "prizes", "rules_version")
+    if not competition_id.strip():
+        payload, error = await _call("GET", "/v1/competitions", ctx,
+                                     {"status": status, "limit": limit, "instance": inst},
+                                     base=CSID_API_BASE, csid=True)
+        if error:
+            return error
+        items = [_drop_empty({k: c.get(k) for k in keep}) for c in payload.get("data") or []]
+        result: dict[str, Any] = {"total": (payload.get("pagination") or {}).get("total"),
+                                  "competitions": items}
+        if not items:
+            result["note"] = ("No competitions yet. They are created through the Data API: "
+                              f"{CSID_WHITE_LABEL_DOCS_URL}")
+        return _compact(result)
+    cid = competition_id.strip()
+    payload, error = await _call("GET", "/v1/competitions/detail", ctx, {"id": cid, "instance": inst},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    c = payload.get("data") or {}
+    result = _drop_empty({k: c.get(k) for k in keep + ("description", "changed_while_running")})
+    if c.get("changes"):
+        result["changes"] = c["changes"]
+    payload, error = await _call("GET", "/v1/competitions/standings", ctx,
+                                 {"id": cid, "limit": limit, "instance": inst},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    s = payload.get("data") or {}
+    result["standings_updated_at"] = s.get("updated_at")
+    result["final"] = s.get("final")
+    result["standings"] = s.get("standings") or []
     return _compact(result)
 
 
