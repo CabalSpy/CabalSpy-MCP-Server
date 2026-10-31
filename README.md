@@ -4,7 +4,7 @@
 [![Glama](https://img.shields.io/badge/Glama-listed-blue?style=flat-square)](https://glama.ai/mcp/servers/CabalSpy/CabalSpy-MCP-Server)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet?style=flat-square)](https://modelcontextprotocol.io/)
 [![Chains](https://img.shields.io/badge/chains-5-brightgreen?style=flat-square)](#chain-coverage)
-[![Tools](https://img.shields.io/badge/tools-29-brightgreen?style=flat-square)](#tools)
+[![Tools](https://img.shields.io/badge/tools-34-brightgreen?style=flat-square)](#tools)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy monitors labeled wallets — key opinion leaders (KOLs), smart money and whales — across **Solana, Base, BNB Chain, Ethereum and Robinhood Chain**, and exposes the data as Model Context Protocol tools.
@@ -71,7 +71,7 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 ## Tools
 
-29 tools: 21 covering the full CabalSpy v1 API and 8 for CabalSpy ID. All read-only.
+34 tools: 23 covering the full CabalSpy v1 API (including the curated calls) and 11 for CabalSpy ID. All read-only.
 
 ### Wallets
 | Tool | What it does |
@@ -103,6 +103,8 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 | `get_signals` | Cluster, entry and exit signals |
 | `get_signal_history` | Past signals for backtesting |
 | `get_analytics` | Volume trend, most traded, win rate, top performers |
+| `get_calls` | The curated CabalSpy calls with trigger wallets and 24 h performance |
+| `get_call_stats` | Hit rates of the calls per chain and tier |
 
 ### CabalSpy ID (SocialFi)
 | Tool | What it does |

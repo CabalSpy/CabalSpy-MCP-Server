@@ -1,12 +1,16 @@
 # Changelog
 
-## 2.4.0 — 2026-10-28
+## 2.5.0 — 2026-10-31
 
 - **White-label tools** for platforms that import their own users into a CabalSpy ID instance, all read-only:
   - `csid_platform_user` — one of your users by your own user id (`external_id`): wallets with trust status, X/Telegram/KOL badge, trading stats per chain for a period, latest trades and theses.
   - `csid_platform_leaderboard` — your platform's users ranked on one chain by `pnl_usd`, `pnl`, `volume`, `win_rate` or `trades`; `verified_only` narrows it to payment-verified wallets.
   - `csid_competitions` — your trading competitions (filter by status); with `competition_id` the rules, every rule change and the current standings.
 - `get_started` and the server instructions describe white-label.
+
+## 2.4.0 — 2026-10-26
+
+- **Calls:** `get_calls` returns the curated CabalSpy calls (the ones posted in Discord) with their trigger wallets and 24 h performance; `get_call_stats` the hit rates per chain and tier. This version ran on mcp.cabalspy.xyz before it reached this repository.
 
 ## 2.3.0 — 2026-10-15
 

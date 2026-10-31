@@ -55,7 +55,7 @@ DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
 #: CabalSpy API; the key's account needs a CabalSpy ID instance.
 CSID_API_BASE = os.environ.get("CSID_API_BASE", "https://api-id.cabalspy.xyz")
 TIMEOUT = 30.0
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
@@ -104,7 +104,8 @@ mcp = FastMCP(
         "CabalSpy tracks labeled crypto wallets — key opinion leaders (KOLs), smart money "
         "and whales — across Solana, BNB Chain, Base, Ethereum and Robinhood Chain (rh). "
         "The tools cover wallets, tokens, the live trade feed, cluster signals, aggregate "
-        "analytics and Jito bundle detection.\n\n"
+        "analytics and Jito bundle detection. get_calls and get_call_stats cover the curated "
+        "CabalSpy calls (the ones posted in Discord) and how well they performed.\n\n"
         "Each user supplies their own CabalSpy API key, either through the 'X-CabalSpy-Key' "
         "header or as an 'api_key' query parameter on the connection URL. Without a key the "
         "tools still work on the public demo: 20 requests per IP per day, data delayed 15 "
@@ -1046,6 +1047,92 @@ async def get_signal_history(
     return await _request("GET", "/v1/signals/history", ctx,
                           {"blockchain": blockchain, "type": wallet_type,
                            "days": days, "mode": mode, "limit": limit}, max_items=8)
+
+
+CALL_CHAINS = ["solana", "bnb", "eth", "rh"]
+CALL_TIERS = ["gamble", "moderate", "good", "big", "whale"]
+
+
+def _check_csv(value: str, allowed: list, parameter: str) -> dict | None:
+    """Comma separated choices, each from allowed. Empty means all."""
+    bad = [v for v in (x.strip().lower() for x in value.split(",")) if v and v not in allowed]
+    if bad:
+        return {"error": {"code": "invalid_parameter", "parameter": parameter,
+                          "message": f"Unknown {parameter} '{bad[0]}'. Allowed: {', '.join(allowed)}."}}
+    return None
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_calls(
+    blockchain: Annotated[str, Field(description=(
+        "Comma separated chains: solana, bnb, eth, rh. Empty for all chains."))] = "",
+    tier: Annotated[str, Field(description=(
+        "Comma separated tiers: gamble, moderate, good, big, whale. Empty for all tiers."))] = "",
+    since: Annotated[str, Field(description=(
+        "Only calls at or after this time, ISO 8601 or Unix seconds. Empty for no limit."))] = "",
+    until: Annotated[str, Field(description=(
+        "Only calls at or before this time, ISO 8601 or Unix seconds. Empty for no limit."))] = "",
+    limit: LimitArg = 15,
+    cursor: CursorArg = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """
+    The curated CabalSpy calls, the same ones posted in the CabalSpy Discord, newest
+    first. Each call has the token, the market cap at the call, the KOL and Smart
+    Money wallets behind it, trading links, and its performance over the 24 hours
+    after the call (peak multiple, minutes to peak, multiple after 24 h).
+
+    Use this for "what did CabalSpy call" or "how did the call on this token do".
+    These are fixed picks per tier; for wallet clusters with your own thresholds use
+    get_signals instead. performance.status 'pending' means the call is younger than
+    about two days and not measured yet, which is not a bad result.
+
+    blockchain: solana, bnb, eth, rh, comma separated (default all)
+    tier: gamble, moderate, good, big, whale, comma separated (default all)
+    since / until: time window, ISO 8601 or Unix seconds
+    limit: how many calls (default 15)
+    cursor: next_cursor from the previous page
+    """
+    if bad := _check_csv(blockchain, CALL_CHAINS, "blockchain"):
+        return bad
+    if bad := _check_csv(tier, CALL_TIERS, "tier"):
+        return bad
+    return await _request("GET", "/v1/calls", ctx,
+                          {"blockchain": blockchain, "tier": tier, "since": since,
+                           "until": until, "limit": limit, "cursor": cursor}, max_items=10)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def get_call_stats(
+    period: Annotated[str, Field(description="1d, 7d, 30d or 90d.")] = "7d",
+    blockchain: Annotated[str, Field(description=(
+        "Comma separated chains: solana, bnb, eth, rh. Empty for all chains."))] = "",
+    tier: Annotated[str, Field(description=(
+        "Comma separated tiers: gamble, moderate, good, big, whale. Empty for all tiers."))] = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """
+    How well the curated CabalSpy calls performed: per chain and tier the number of
+    calls, the share that reached 2x, 5x and 10x within 24 hours, the median peak
+    multiple and minutes to peak, plus the best calls of the period.
+
+    Use this for "how good are CabalSpy calls" or "which tier works best". Only the
+    first call per token, tier and day counts; calls without price data are left out
+    of the hit rate. Calls from the last one to two days count as pending.
+
+    period: 1d, 7d, 30d or 90d (default 7d)
+    blockchain: solana, bnb, eth, rh, comma separated (default all)
+    tier: gamble, moderate, good, big, whale, comma separated (default all)
+    """
+    if period not in ("1d", "7d", "30d", "90d"):
+        return {"error": {"code": "invalid_parameter", "parameter": "period",
+                          "message": "period must be one of 1d, 7d, 30d, 90d."}}
+    if bad := _check_csv(blockchain, CALL_CHAINS, "blockchain"):
+        return bad
+    if bad := _check_csv(tier, CALL_TIERS, "tier"):
+        return bad
+    return await _request("GET", "/v1/calls/stats", ctx,
+                          {"period": period, "blockchain": blockchain, "tier": tier})
 
 
 @tool(annotations=READ_ONLY, structured_output=True)
