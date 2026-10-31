@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.0 — 2026-10-31
+
+- **Callouts tools** for CabalSpy ID instances with the callouts extra, all read-only:
+  - `csid_callouts` — the latest callouts of your platform, for one token (`chain` + `mint`) or for one user (`external_id` or `csid_id`): token, author, call time, market cap at the call, now/peak multiple, `score_x` and tracking phase.
+  - `csid_callout_leaderboard` — your best callers per period (6h/1d/7d/30d), sorted by `avg_peak_x`, `best_peak_x`, `sum_peak_x`, `hit_rate`, `callouts` or `median_peak_x`; `chain`, `min_callouts` and `hit_x` filters.
+  - `csid_callout_stats` — one user's callout track record per period.
+- `feature_not_enabled` (403) is passed through as its own error with a hint that callouts are switched on per instance on request (contact@cabalspy.xyz), instead of the generic auth answer.
+- `csid_competitions` shows callout competitions: `kind` (`trading` or `callouts`) and `min_callouts` / `hit_x` in the list and detail.
+- `get_started`, the server instructions and the README describe callouts.
+
 ## 2.5.0 — 2026-10-31
 
 - **White-label tools** for platforms that import their own users into a CabalSpy ID instance, all read-only:

@@ -4,7 +4,7 @@
 [![Glama](https://img.shields.io/badge/Glama-listed-blue?style=flat-square)](https://glama.ai/mcp/servers/CabalSpy/CabalSpy-MCP-Server)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet?style=flat-square)](https://modelcontextprotocol.io/)
 [![Chains](https://img.shields.io/badge/chains-5-brightgreen?style=flat-square)](#chain-coverage)
-[![Tools](https://img.shields.io/badge/tools-34-brightgreen?style=flat-square)](#tools)
+[![Tools](https://img.shields.io/badge/tools-37-brightgreen?style=flat-square)](#tools)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy monitors labeled wallets — key opinion leaders (KOLs), smart money and whales — across **Solana, Base, BNB Chain, Ethereum and Robinhood Chain**, and exposes the data as Model Context Protocol tools.
@@ -71,7 +71,7 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 ## Tools
 
-34 tools: 23 covering the full CabalSpy v1 API (including the curated calls) and 11 for CabalSpy ID. All read-only.
+37 tools: 23 covering the full CabalSpy v1 API (including the curated calls) and 14 for CabalSpy ID. All read-only.
 
 ### Wallets
 | Tool | What it does |
@@ -128,9 +128,21 @@ For platforms that keep their own login and import their users into a CabalSpy I
 |---|---|
 | `csid_platform_user` | One of your users by your own user id: wallets with their trust status, X/Telegram/KOL badge, trading stats per chain, latest trades |
 | `csid_platform_leaderboard` | Your platform's users ranked on one chain by PnL, volume, win rate or trades, each with your user id |
-| `csid_competitions` | Your trading competitions; with an id the rules, every rule change and the current standings |
+| `csid_competitions` | Your trading and callout competitions (`kind`); with an id the rules, every rule change and the current standings |
 
 They need your own key and a CabalSpy ID instance, like the theses tools.
+
+### Callouts
+
+Callouts are an extra of [CabalSpy ID](https://docs.cabalspy.xyz/cabalspy-id), switched on per instance on request ([contact@cabalspy.xyz](mailto:contact@cabalspy.xyz)). A user calls a token; the price and market cap are stamped and tracked every minute for the first 24 hours (then scored on candles), after that every 5 minutes while the token is active, until it spends 24 hours in a row below a $10k market cap. Each callout is scored by `score_x`, its peak multiple. Read-only: making and removing callouts stays in the Data API.
+
+| Tool | What it returns |
+|---|---|
+| `csid_callouts` | The latest callouts of your platform, or for one token (`chain` + `mint`: who called it and how it did), or for one user (`external_id` or `csid_id`): token, author, call time, market cap at the call, now/peak multiple, `score_x`, tracking phase |
+| `csid_callout_leaderboard` | Your best callers for 6h, 1d, 7d or 30d, sorted by average, median, best or summed peak multiple, hit rate or count; filter by chain and `min_callouts` |
+| `csid_callout_stats` | One user's track record per period: callouts, average/median/best peak multiple, hit rate, average multiple now |
+
+Without the extra they return `feature_not_enabled` with a hint to ask for it.
 
 ### Onboarding
 | Tool | What it does |

@@ -55,7 +55,7 @@ DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
 #: CabalSpy API; the key's account needs a CabalSpy ID instance.
 CSID_API_BASE = os.environ.get("CSID_API_BASE", "https://api-id.cabalspy.xyz")
 TIMEOUT = 30.0
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
@@ -135,7 +135,15 @@ mcp = FastMCP(
         "CabalSpy ID instance; if they return 'csid_setup_required' or 'no_instance', pass on "
         "the setup link. Platforms that keep their own login (white-label) address their "
         "imported users by their own user id: csid_platform_user, csid_platform_leaderboard "
-        "and csid_competitions."
+        "and csid_competitions (trading and callout competitions).\n\n"
+        "Callouts (an extra of CabalSpy ID, switched on per instance on request): a user calls "
+        "a token, its price and market cap are stamped and tracked (every minute for the first "
+        "24 h, then every 5 minutes while active; tracking stops after 24 h in a row below a "
+        "$10k market cap). score_x is the peak multiple since the call. csid_callouts lists "
+        "callouts (latest, one token, one user), csid_callout_leaderboard ranks the callers "
+        "and csid_callout_stats gives one user's track record. If they return "
+        "'feature_not_enabled', callouts are not switched on for that instance: pass on the "
+        "hint to ask contact@cabalspy.xyz."
     ),
 )
 
@@ -281,7 +289,9 @@ _CSID_SETUP_CODES = {"product_not_enabled", "no_instance", "instance_required",
                      "instance_not_found", "instance_forbidden"}
 #: 403s that are about what the key may see, not about the key itself. Every
 #: other 401/403 (invalid key, no credits) keeps the usual auth answer.
-_CSID_PASS_403 = _CSID_SETUP_CODES | {"scope_not_allowed", "plan_user_limit"}
+_CSID_PASS_403 = _CSID_SETUP_CODES | {"scope_not_allowed", "plan_user_limit", "feature_not_enabled"}
+#: Callouts are an extra that CabalSpy switches on per instance on request.
+CALLOUTS_CONTACT = "contact@cabalspy.xyz"
 
 
 def _csid_error(code: str, message: str, status: int) -> dict:
@@ -293,6 +303,13 @@ def _csid_error(code: str, message: str, status: int) -> dict:
             "In the CabalSpy API dashboard, open CabalSpy ID, create an instance (free plan "
             "available) and enable the key for CabalSpy ID. With several instances, pass "
             "'instance' (the instance's client_id)."
+        )
+    elif code == "feature_not_enabled":
+        out["contact"] = CALLOUTS_CONTACT
+        out["hint"] = (
+            "Callouts (and callout competitions) are an extra of CabalSpy ID that is switched "
+            f"on per instance on request. Ask CabalSpy at {CALLOUTS_CONTACT} to enable it for "
+            "this instance. Nothing is wrong with the key."
         )
     return out
 
@@ -546,11 +563,22 @@ async def get_started() -> dict[str, Any]:
                 "csid_leaderboard": "your instance's verified traders ranked",
                 "csid_platform_user": "white-label: one of your platform's users by your own user id",
                 "csid_platform_leaderboard": "white-label: your platform's users ranked",
-                "csid_competitions": "white-label: your trading competitions and standings",
+                "csid_competitions": "white-label: your trading and callout competitions and standings",
+                "csid_callouts": "callouts on your instance: latest, for one token or one user",
+                "csid_callout_leaderboard": "your best callers per period, scored by peak multiple",
+                "csid_callout_stats": "one user's callout track record per period",
             },
+            "callouts": (
+                "An extra of CabalSpy ID, switched on per instance on request "
+                f"({CALLOUTS_CONTACT}). A user calls a token; its price and market cap are "
+                "stamped and tracked every minute for the first 24 hours (then scored on "
+                "candles), after that every 5 minutes while the token is active. Tracking stops "
+                "after 24 hours in a row below a $10k market cap. score_x is the peak multiple. "
+                "Without the extra the callout tools return 'feature_not_enabled'."
+            ),
             "white_label": (
                 "Platforms with their own login import their users and wallets into a CabalSpy "
-                "ID instance and get trades, PnL, leaderboards and trading competitions through "
+                "ID instance and get trades, PnL, leaderboards and competitions through "
                 "the Data API, without CabalSpy branding. Creating and importing users happens in "
                 "the Data API; these tools only read."
             ),
@@ -1913,11 +1941,17 @@ async def csid_competitions(competition_id: Annotated[str, Field(description=(
                                 "How many competitions or standings rows (1-50, default 10)."))] = 10,
                             instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
     """
-    Trading competitions of YOUR platform (white-label): without competition_id the
-    list (name, chain, metric, status, start and end, participants); with it the
+    Competitions of YOUR platform (white-label): without competition_id the list
+    (name, kind, chain, metric, status, start and end, participants); with it the
     rules, every rule change and the current standings with your own user ids
     (standings are recomputed every 5 minutes, final once ended). Use for "Who is
     leading the competition?" or "Which competitions are running?".
+
+    'kind' is 'trading' (ranked on trades: pnl_usd, pnl, volume, trades, win_rate;
+    min_trades / min_volume_usd) or 'callouts' (ranked on the callouts made during
+    the competition, each scored by its peak multiple: avg_peak_x, best_peak_x,
+    sum_peak_x, hit_rate, callouts; min_callouts to qualify, hit_x = the multiple
+    that counts as a hit).
 
     Needs your own CabalSpy API key with a CabalSpy ID instance (no demo).
     """
@@ -1926,9 +1960,10 @@ async def csid_competitions(competition_id: Annotated[str, Field(description=(
     if not _has_own_key(ctx):
         return _CSID_NEEDS_KEY
     inst = _resolve_instance(ctx, instance)
-    keep = ("id", "name", "chain", "metric", "status", "starts_at", "ends_at", "ended_at",
+    keep = ("id", "name", "kind", "chain", "metric", "status", "starts_at", "ends_at", "ended_at",
             "participants", "min_participants", "max_participants", "min_trades",
-            "min_volume_usd", "wallet_trust", "enrollment", "late_join", "prizes", "rules_version")
+            "min_volume_usd", "min_callouts", "hit_x", "wallet_trust", "enrollment", "late_join",
+            "prizes", "rules_version")
     if not competition_id.strip():
         payload, error = await _call("GET", "/v1/competitions", ctx,
                                      {"status": status, "limit": limit, "instance": inst},
@@ -1961,6 +1996,241 @@ async def csid_competitions(competition_id: Annotated[str, Field(description=(
     result["final"] = s.get("final")
     result["standings"] = s.get("standings") or []
     return _compact(result)
+
+
+# ── Callouts: users call a token, CabalSpy tracks how it did ──────────────────
+#
+# An extra of CabalSpy ID, switched on per instance on request. When a user
+# calls a token, the price and market cap are stamped; for the first 24 hours
+# the price is tracked every minute (then scored on candles), after that every
+# 5 minutes while the token is active, until it spends 24 h in a row below a
+# $10k market cap. score_x is the peak multiple. These tools only read; making
+# and removing callouts stays in the Data API.
+
+CALLOUT_PERIODS = ["6h", "1d", "7d", "30d"]
+CALLOUT_SORTS = ["avg_peak_x", "best_peak_x", "sum_peak_x", "hit_rate", "callouts", "median_peak_x"]
+CALLOUTS_DOCS_URL = CSID_DOCS_URL
+
+CalloutExternalIdArg = Annotated[str, Field(description=(
+    "Only this user: their id on YOUR platform (external_id), as passed when the user was "
+    "created or imported. Pass external_id or csid_id, not both."
+))]
+CalloutCsidIdArg = Annotated[str, Field(description=(
+    "Only this user: their CabalSpy ID user id (UUID), for users who signed in with "
+    "CabalSpy ID themselves. Pass external_id or csid_id, not both."
+))]
+HitXArg = Annotated[float, Field(gt=1, le=1000, description=(
+    "The peak multiple that counts as a hit for hits and hit_rate_percent, e.g. 2 for a "
+    "2x (default 2, above 1 and at most 1000)."
+))]
+
+
+def _slim_caller(a: Any) -> dict | None:
+    """A callout author or leaderboard person: your user id first."""
+    if not isinstance(a, dict):
+        return None
+    return _drop_empty({"external_id": a.get("external_id"), "username": a.get("username"),
+                        "name": a.get("name"), "csid_id": a.get("csid_id"),
+                        "kol": a.get("kol") or None})
+
+
+def _slim_summary(s: dict) -> dict:
+    """The server's summary of a list of peak multiples; hit_rate is a percentage."""
+    out = {k: s.get(k) for k in ("callouts", "avg_peak_x", "median_peak_x", "best_peak_x",
+                                 "sum_peak_x", "hits")}
+    out["hit_rate_percent"] = s.get("hit_rate")
+    for k in ("avg_now_x", "tracking"):
+        if k in s:
+            out[k] = s[k]
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _slim_callout(c: dict) -> dict:
+    token = c.get("token") or {}
+    at_call = c.get("at_call") or {}
+    now = c.get("now") or {}
+    peak = c.get("peak") or {}
+    tr = c.get("tracking") or {}
+    return _drop_empty({
+        "id": c.get("id"), "chain": c.get("chain"), "mint": c.get("mint"),
+        "token": token.get("symbol") or token.get("name"),
+        "author": _slim_caller(c.get("author")),
+        "called_at": c.get("called_at"),
+        "market_cap_at_call_usd": at_call.get("market_cap_usd"),
+        "price_at_call_usd": at_call.get("price_usd"),
+        "now_x": now.get("x"), "now_market_cap_usd": now.get("market_cap_usd"),
+        "peak_x": peak.get("x"), "peak_at": peak.get("at"),
+        "score_x": c.get("score_x"),
+        "phase": tr.get("phase"),
+        "stop_reason": tr.get("stop_reason"),
+        "note": c.get("note"),
+    })
+
+
+def _check_callout_user(external_id: str, csid_id: str) -> dict | None:
+    if external_id.strip() and csid_id.strip():
+        return {"error": "invalid_parameter", "parameter": "external_id",
+                "message": "Pass external_id or csid_id, not both."}
+    return None
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_callouts(chain: Annotated[str, Field(description=(
+                            "Only callouts on this blockchain: solana, bnb, base, eth or rh. "
+                            "Required together with mint. Leave empty for all chains."))] = "",
+                        mint: Annotated[str, Field(description=(
+                            "Only callouts of this token (mint on Solana, contract on EVM); "
+                            "needs chain. Answers 'who called this token and how did it do'."))] = "",
+                        external_id: CalloutExternalIdArg = "",
+                        csid_id: CalloutCsidIdArg = "",
+                        limit: Annotated[int, Field(ge=1, le=50, description=(
+                            "How many callouts (1-50, default 10)."))] = 10,
+                        cursor: CursorArg = "",
+                        instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    Callouts on YOUR CabalSpy ID instance, newest first: users call a token and
+    CabalSpy stamps the price and market cap and tracks it. Without filters the
+    latest callouts of your platform; with chain + mint the callouts of one token
+    ("Who called this token and how did it do?"); with external_id or csid_id the
+    callouts of one user. Each entry: token, author (your user id), called_at,
+    market cap at the call, now_x and peak_x (multiples since the call), score_x
+    (the peak multiple the callout is scored by) and the tracking phase
+    (first_day: every minute for 24 h, then scored on candles; extended: every
+    5 minutes while active; stopped: after 24 h in a row below a $10k market cap).
+
+    Callouts are an extra switched on per instance on request; otherwise this
+    returns feature_not_enabled. Needs your own CabalSpy API key with a CabalSpy
+    ID instance (no demo).
+    """
+    chain, mint = chain.strip().lower(), mint.strip()
+    if chain and (bad := _check_chain(chain, "chain")):
+        return bad
+    if mint and not chain:
+        return {"error": "invalid_parameter", "parameter": "chain",
+                "message": "Pass chain together with mint.", "allowed": CHAINS}
+    if bad := _check_callout_user(external_id, csid_id):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/callouts", ctx,
+                                 {"chain": chain, "mint": mint, "external_id": external_id.strip(),
+                                  "csid_id": csid_id.strip(), "limit": limit, "cursor": cursor,
+                                  "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    items = [_slim_callout(c) for c in payload.get("data") or [] if isinstance(c, dict)]
+    result: dict[str, Any] = {"callouts": items}
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    if not items:
+        result["note"] = ("No callouts match. Callouts are made through the Data API: "
+                          f"{CALLOUTS_DOCS_URL}")
+    result = _with_trade_url(result, chain, mint)
+    return _compact(result)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_callout_leaderboard(period: Annotated[str, Field(description=(
+                                       "Callouts made in the last 6h, 1d, 7d (default) or 30d."))] = "7d",
+                                   sort: Annotated[str, Field(description=(
+                                       "avg_peak_x (default), best_peak_x, sum_peak_x, hit_rate, "
+                                       "callouts or median_peak_x."))] = "avg_peak_x",
+                                   chain: OptionalChainArg = "",
+                                   min_callouts: Annotated[int, Field(ge=1, le=1000, description=(
+                                       "Only callers with at least this many callouts in the period "
+                                       "(1-1000, default 1). Raise it to keep one lucky call from "
+                                       "topping the average."))] = 1,
+                                   hit_x: HitXArg = 2.0,
+                                   limit: Annotated[int, Field(ge=1, le=50, description=(
+                                       "How many callers (1-50, default 10)."))] = 10,
+                                   cursor: CursorArg = "",
+                                   instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    The best callers of YOUR CabalSpy ID instance for a period (6h, 1d, 7d, 30d):
+    each user's callouts in the period, scored by their peak multiples (score_x),
+    with average, median, best and summed peak multiple, hits and hit rate (share
+    of callouts that reached hit_x), and their best call. Entries carry your own
+    user id (external_id). Use for "Who are the best callers this week?".
+
+    Callouts are an extra switched on per instance on request; otherwise this
+    returns feature_not_enabled. Needs your own CabalSpy API key with a CabalSpy
+    ID instance (no demo).
+    """
+    chain = chain.strip().lower()
+    if (bad := _check_choice(period, CALLOUT_PERIODS, "period")) or \
+            (bad := _check_choice(sort, CALLOUT_SORTS, "sort")):
+        return bad
+    if chain and (bad := _check_chain(chain, "chain")):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/callouts/leaderboard", ctx,
+                                 {"period": period, "sort": sort, "chain": chain,
+                                  "min_callouts": min_callouts, "hit_x": hit_x, "limit": limit,
+                                  "cursor": cursor, "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    d = payload.get("data") or {}
+    rows = []
+    for e in d.get("leaderboard") or []:
+        best = e.get("best_call") or {}
+        person = _slim_caller(e.get("author")) or {"csid_id": e.get("csid_id")}
+        rows.append(_drop_empty({
+            "rank": e.get("rank"), **person, **_slim_summary(e),
+            "best_call": _drop_empty({"token": best.get("symbol"), "chain": best.get("chain"),
+                                      "mint": best.get("mint"), "peak_x": best.get("peak_x")}),
+        }))
+    result: dict[str, Any] = {"period": d.get("period", period), "sort": d.get("sort", sort),
+                              "chain": d.get("chain") or "all", "hit_x": d.get("hit_x", hit_x),
+                              "min_callouts": min_callouts,
+                              "total": (payload.get("pagination") or {}).get("total"),
+                              "leaderboard": rows}
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    if not rows:
+        result["note"] = "Nobody on your instance made enough callouts in this period."
+    return _compact(result)
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_callout_stats(external_id: CalloutExternalIdArg = "",
+                             csid_id: CalloutCsidIdArg = "",
+                             hit_x: HitXArg = 2.0,
+                             instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    The callout track record of ONE user of YOUR CabalSpy ID instance, per period
+    (callouts made in the last 6h, 1d, 7d and 30d): number of callouts, average,
+    median, best and summed peak multiple (score_x), hits and hit rate (share that
+    reached hit_x), the average multiple right now and how many are still being
+    tracked, plus the all-time count. Use for "How good are this user's calls?".
+    Pass external_id (your user id) or csid_id.
+
+    Callouts are an extra switched on per instance on request; otherwise this
+    returns feature_not_enabled. Needs your own CabalSpy API key with a CabalSpy
+    ID instance (no demo).
+    """
+    if not external_id.strip() and not csid_id.strip():
+        return {"error": "invalid_parameter", "parameter": "external_id",
+                "message": "Pass the user's id on your platform (external_id) or their csid_id."}
+    if bad := _check_callout_user(external_id, csid_id):
+        return bad
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    payload, error = await _call("GET", "/v1/callouts/stats", ctx,
+                                 {"external_id": external_id.strip(), "csid_id": csid_id.strip(),
+                                  "hit_x": hit_x, "instance": _resolve_instance(ctx, instance)},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    d = payload.get("data") or {}
+    periods = {name: _slim_summary(s) for name, s in (d.get("periods") or {}).items()
+               if isinstance(s, dict)}
+    return _compact(_drop_empty({
+        "user": _slim_caller(d.get("user")), "hit_x": d.get("hit_x", hit_x),
+        "periods": periods, "callouts_all_time": d.get("callouts_all_time"),
+    }))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
