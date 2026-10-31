@@ -20,6 +20,7 @@ import MCP_server as srv  # noqa: E402
 CSID_TOOLS = {
     "csid_profile", "csid_wallet_owner", "csid_kols", "csid_token_theses",
     "csid_latest_theses", "csid_user_theses", "csid_thesis", "csid_leaderboard",
+    "csid_platform_user", "csid_platform_leaderboard", "csid_competitions",
 }
 BONK = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 
@@ -334,6 +335,108 @@ def test_leaderboard_global_needs_enterprise(mock, own_key):
     out = call("csid_leaderboard", blockchain="solana", scope="global")
     assert out["error"] == "scope_not_allowed" and "Enterprise" in out["message"]
     assert call("csid_leaderboard", blockchain="solana", sort="moon")["parameter"] == "sort"
+
+
+# ── white-label ───────────────────────────────────────────────────────────────
+
+SOL_WALLET = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+
+
+def entry(rank: int, ext: str, pnl: float) -> dict:
+    return {"rank": rank, "external_id": ext, "wallet": SOL_WALLET, "verified": False,
+            "profile": {"profile_url": None},
+            "period_stats": {"total_volume": 10.0, "total_volume_usd": 1500.0, "realized_pnl": 1.0,
+                             "realized_pnl_usd": pnl, "total_txn": 7},
+            "period_win_rate_distribution": {"win_rate_percentage": 50.0, "closed_count": 4}}
+
+
+def test_white_label_tools_refuse_demo_without_calling(mock):
+    assert call("csid_platform_user", external_id="42")["error"] == "csid_setup_required"
+    assert call("csid_platform_leaderboard", blockchain="solana")["error"] == "csid_setup_required"
+    assert call("csid_competitions")["error"] == "csid_setup_required"
+    assert mock.requests == []
+
+
+def test_platform_user(mock, own_key):
+    mock.routes[("csid.test", "/v1/platform-users/profile")] = ok({
+        "csid_id": "c1", "external_id": "did:privy:abc", "display_name": "Trader 1", "claimed": False,
+        "x": None, "telegram": None, "kol": {"badge": False, "since": None},
+        "wallets": [{"address": SOL_WALLET, "family": "solana", "status": "active", "source": "privy"}],
+        "period": "7d", "recent_trades": [], "theses": {"total": 0, "latest": []},
+        "trading": [{"blockchain": "solana", "currency": "SOL", "total_volume": 10.0,
+                     "total_volume_usd": 1500.0, "realized_pnl_usd": 120.0, "win_rate_percentage": 50.0,
+                     "closed_count": 4, "total_txn": 7, "tokens": 3,
+                     "wallets": [{"address": SOL_WALLET, "verified": False, "total_volume_usd": 1500.0,
+                                  "realized_pnl_usd": 120.0}]}],
+        "created_at": "2026-10-26T10:00:00Z"})
+    out = call("csid_platform_user", external_id=" did:privy:abc ", period="30d")
+    params = mock.last().url.params
+    assert params["external_id"] == "did:privy:abc" and params["period"] == "30d"
+    assert out["display_name"] == "Trader 1" and out["wallets"][0]["status"] == "active"
+    assert out["trading"][0]["realized_pnl_usd"] == 120.0 and "kol" not in out
+    assert call("csid_platform_user", external_id=" ")["parameter"] == "external_id"
+    assert call("csid_platform_user", external_id="42", period="1y")["parameter"] == "period"
+
+
+def test_platform_user_not_found_passes_error(mock, own_key):
+    mock.routes[("csid.test", "/v1/platform-users/profile")] = fail(
+        404, "platform_user_not_found", "No user with this external_id in your instance.")
+    assert call("csid_platform_user", external_id="nobody")["error"] == "platform_user_not_found"
+
+
+def test_platform_leaderboard(mock, own_key):
+    mock.routes[("csid.test", "/v1/platform-users/leaderboard")] = ok(
+        {"blockchain": "solana", "period": "7d", "sort": "pnl_usd", "currency": "SOL", "trust": "all",
+         "leaderboard": [entry(1, "u1", 300.0), entry(2, "u2", 100.0)]},
+        pagination={"limit": 2, "total": 9, "has_more": True, "next_cursor": SOL_WALLET})
+    out = call("csid_platform_leaderboard", blockchain="solana", limit=2, verified_only=True)
+    params = mock.last().url.params
+    assert params["trust"] == "verified" and params["limit"] == "2" and "cursor" not in params
+    assert [r["external_id"] for r in out["leaderboard"]] == ["u1", "u2"]
+    assert out["total"] == 9 and out["next_cursor"] == SOL_WALLET
+    call("csid_platform_leaderboard", blockchain="solana")
+    assert "trust" not in mock.last().url.params
+    assert call("csid_platform_leaderboard", blockchain="sol")["parameter"] == "blockchain"
+
+
+def test_platform_leaderboard_empty_has_note(mock, own_key):
+    mock.routes[("csid.test", "/v1/platform-users/leaderboard")] = ok(
+        {"blockchain": "base", "leaderboard": []}, pagination={"total": 0, "next_cursor": None})
+    out = call("csid_platform_leaderboard", blockchain="base")
+    assert out["leaderboard"] == [] and "note" in out and "next_cursor" not in out
+
+
+def test_competitions_list_and_detail(mock, own_key):
+    comp = {"id": "k1", "name": "Weekly", "chain": "solana", "metric": "pnl_usd", "status": "running",
+            "starts_at": "2026-10-27T00:00:00Z", "ends_at": "2026-11-03T00:00:00Z", "participants": 120,
+            "min_trades": 1, "min_volume_usd": 0.0, "wallet_trust": "all", "enrollment": "opt_in",
+            "late_join": True, "prizes": None, "rules_version": 2, "description": "Top PnL wins"}
+    mock.routes[("csid.test", "/v1/competitions")] = ok([comp], pagination={"total": 1})
+    out = call("csid_competitions", status="running")
+    assert mock.last().url.params["status"] == "running"
+    assert out["total"] == 1 and out["competitions"][0]["name"] == "Weekly"
+    assert "description" not in out["competitions"][0]
+
+    mock.routes[("csid.test", "/v1/competitions/detail")] = ok(
+        {**comp, "changes": [{"rules_version": 2, "during": "running", "changes": {"min_trades": [0, 1]},
+                              "note": "spam", "changed_at": "2026-10-28T10:00:00Z"}],
+         "changed_while_running": True})
+    mock.routes[("csid.test", "/v1/competitions/standings")] = ok(
+        {"competition_id": "k1", "status": "running", "metric": "pnl_usd", "rules_version": 2,
+         "updated_at": "2026-10-28T16:50:00Z", "final": False,
+         "standings": [{"rank": 1, "ranked": True, "external_id": "u1", "csid_id": "c1", "score": 300.0}]})
+    out = call("csid_competitions", competition_id="k1", limit=5)
+    assert mock.last().url.params["id"] == "k1" and mock.last().url.params["limit"] == "5"
+    assert out["changed_while_running"] is True and out["changes"][0]["note"] == "spam"
+    assert out["standings"][0]["external_id"] == "u1" and out["final"] is False
+
+
+def test_competitions_empty_and_validation(mock, own_key):
+    mock.routes[("csid.test", "/v1/competitions")] = ok([], pagination={"total": 0})
+    assert "white-label" in call("csid_competitions")["note"]
+    assert call("csid_competitions", status="live")["parameter"] == "status"
+    mock.routes[("csid.test", "/v1/competitions/detail")] = fail(404, "competition_not_found")
+    assert call("csid_competitions", competition_id="nope")["error"] == "competition_not_found"
 
 
 # ── the refactored HTTP layer still behaves like before for the old tools ─────

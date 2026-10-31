@@ -4,7 +4,7 @@
 [![Glama](https://img.shields.io/badge/Glama-listed-blue?style=flat-square)](https://glama.ai/mcp/servers/CabalSpy/CabalSpy-MCP-Server)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet?style=flat-square)](https://modelcontextprotocol.io/)
 [![Chains](https://img.shields.io/badge/chains-5-brightgreen?style=flat-square)](#chain-coverage)
-[![Tools](https://img.shields.io/badge/tools-29-brightgreen?style=flat-square)](#tools)
+[![Tools](https://img.shields.io/badge/tools-34-brightgreen?style=flat-square)](#tools)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy monitors labeled wallets — key opinion leaders (KOLs), smart money and whales — across **Solana, Base, BNB Chain, Ethereum and Robinhood Chain**, and exposes the data as Model Context Protocol tools.
@@ -71,7 +71,7 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 ## Tools
 
-29 tools: 21 covering the full CabalSpy v1 API and 8 for CabalSpy ID. All read-only.
+34 tools: 23 covering the full CabalSpy v1 API (including the curated calls) and 11 for CabalSpy ID. All read-only.
 
 ### Wallets
 | Tool | What it does |
@@ -103,6 +103,8 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 | `get_signals` | Cluster, entry and exit signals |
 | `get_signal_history` | Past signals for backtesting |
 | `get_analytics` | Volume trend, most traded, win rate, top performers |
+| `get_calls` | The curated CabalSpy calls with trigger wallets and 24 h performance |
+| `get_call_stats` | Hit rates of the calls per chain and tier |
 
 ### CabalSpy ID (SocialFi)
 | Tool | What it does |
@@ -117,6 +119,18 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 | `csid_leaderboard` | Your instance's verified traders ranked by volume, PnL, win rate or trades (all CabalSpy ID users on Enterprise) |
 
 `csid_profile`, `csid_wallet_owner` and `csid_kols` use the CabalSpy API and work on the keyless demo with sandbox identities only (try `csid_sandbox_kol`). The theses and leaderboard tools use the [CabalSpy ID Data API](https://docs.cabalspy.xyz/cabalspy-id): they need your own key, enabled for CabalSpy ID, and a CabalSpy ID instance — create one (free plan available) at [apidashboard.cabalspy.xyz/csid](https://apidashboard.cabalspy.xyz/csid). Theses are global: every key reads the theses of every platform. If your account has several instances, pass `instance` (the client_id) or set an `X-CSID-Instance` header on the connection.
+
+### White-label (your platform's own users)
+
+For platforms that keep their own login and import their users into a CabalSpy ID instance ([white-label](https://docs.cabalspy.xyz/cabalspy-id/white-label)). Users are addressed by your own user id (`external_id`). Read-only: creating, importing and deleting users stays in the Data API.
+
+| Tool | What it returns |
+|---|---|
+| `csid_platform_user` | One of your users by your own user id: wallets with their trust status, X/Telegram/KOL badge, trading stats per chain, latest trades |
+| `csid_platform_leaderboard` | Your platform's users ranked on one chain by PnL, volume, win rate or trades, each with your user id |
+| `csid_competitions` | Your trading competitions; with an id the rules, every rule change and the current standings |
+
+They need your own key and a CabalSpy ID instance, like the theses tools.
 
 ### Onboarding
 | Tool | What it does |
