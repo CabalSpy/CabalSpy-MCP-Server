@@ -21,6 +21,7 @@ CSID_TOOLS = {
     "csid_profile", "csid_wallet_owner", "csid_kols", "csid_token_theses",
     "csid_latest_theses", "csid_user_theses", "csid_thesis", "csid_leaderboard",
     "csid_platform_user", "csid_platform_leaderboard", "csid_competitions",
+    "csid_callouts", "csid_callout_leaderboard", "csid_callout_stats",
 }
 BONK = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 
@@ -437,6 +438,179 @@ def test_competitions_empty_and_validation(mock, own_key):
     assert call("csid_competitions", status="live")["parameter"] == "status"
     mock.routes[("csid.test", "/v1/competitions/detail")] = fail(404, "competition_not_found")
     assert call("csid_competitions", competition_id="nope")["error"] == "competition_not_found"
+
+
+# ── callouts (an extra, switched on per instance) ─────────────────────────────
+
+AUTHOR = {"csid_id": "c1", "external_id": "u1", "name": "Trader 1", "username": "trader1",
+          "avatar_url": None, "kol": False}
+
+
+def callout(i: int, phase: str = "first_day") -> dict:
+    """The shape of app/callouts.py present()."""
+    return {
+        "id": f"co{i}", "chain": "solana", "mint": BONK,
+        "token": {"name": "Bonk", "symbol": "BONK", "logo": "https://x/logo.png"},
+        "author": AUTHOR, "note": "send it", "called_at": "2026-10-30T12:00:00Z",
+        "window_ends_at": "2026-10-31T12:00:00Z", "status": "tracking" if phase != "stopped" else "final",
+        "at_call": {"price_usd": 0.00002, "market_cap_usd": 1_500_000.0},
+        "now": {"price_usd": 0.00003, "market_cap_usd": 2_250_000.0, "x": 1.5, "at": "2026-10-30T13:00:00Z"},
+        "peak": {"price_usd": 0.00005, "market_cap_usd": 3_750_000.0, "x": 2.5, "at": "2026-10-30T12:40:00Z"},
+        "score_x": 2.5, "source": "api",
+        "tracking": {"active": phase != "stopped", "phase": phase, "next_check_at": None, "below_10k_since": None,
+                     "daily_checks": 0, "stopped_at": None, "stop_reason": None if phase != "stopped" else "below_10k"},
+    }
+
+
+SUMMARY = {"callouts": 4, "avg_peak_x": 2.1, "median_peak_x": 1.8, "best_peak_x": 4.0, "sum_peak_x": 8.4,
+           "hits": 2, "hit_rate": 50.0}
+
+
+def test_callout_tools_refuse_demo_without_calling(mock):
+    assert call("csid_callouts")["error"] == "csid_setup_required"
+    assert call("csid_callout_leaderboard")["error"] == "csid_setup_required"
+    assert call("csid_callout_stats", external_id="u1")["error"] == "csid_setup_required"
+    assert mock.requests == []
+
+
+def test_callouts_latest_slim(mock, own_key):
+    mock.routes[("csid.test", "/v1/callouts")] = ok(
+        [callout(1), callout(2, "stopped")], pagination={"limit": 2, "has_more": True, "next_cursor": "abc"})
+    out = call("csid_callouts", limit=2)
+    params = mock.last().url.params
+    assert params["limit"] == "2" and "chain" not in params and "external_id" not in params
+    first = out["callouts"][0]
+    assert first == {
+        "id": "co1", "chain": "solana", "mint": BONK, "token": "BONK",
+        "author": {"external_id": "u1", "username": "trader1", "name": "Trader 1", "csid_id": "c1"},
+        "called_at": "2026-10-30T12:00:00Z", "market_cap_at_call_usd": 1_500_000.0, "price_at_call_usd": 0.00002,
+        "now_x": 1.5, "now_market_cap_usd": 2_250_000.0, "peak_x": 2.5, "peak_at": "2026-10-30T12:40:00Z",
+        "score_x": 2.5, "phase": "first_day", "note": "send it"}
+    assert out["callouts"][1]["phase"] == "stopped" and out["callouts"][1]["stop_reason"] == "below_10k"
+    assert out["next_cursor"] == "abc" and "trade_url" not in out
+
+
+def test_callouts_for_token_and_user(mock, own_key):
+    mock.routes[("csid.test", "/v1/callouts")] = ok([callout(1)], pagination={"next_cursor": None})
+    out = call("csid_callouts", chain="Solana", mint=f" {BONK} ")
+    params = mock.last().url.params
+    assert params["chain"] == "solana" and params["mint"] == BONK
+    assert out["trade_url"].endswith(BONK) and "next_cursor" not in out
+    call("csid_callouts", external_id=" u1 ", cursor="abc", instance="csid_x")
+    params = mock.last().url.params
+    assert params["external_id"] == "u1" and params["cursor"] == "abc" and params["instance"] == "csid_x"
+    call("csid_callouts", csid_id="c1")
+    assert mock.last().url.params["csid_id"] == "c1"
+
+
+def test_callouts_validation(mock, own_key):
+    assert call("csid_callouts", mint=BONK)["parameter"] == "chain"
+    assert call("csid_callouts", chain="sol")["parameter"] == "chain"
+    assert call("csid_callouts", external_id="u1", csid_id="c1")["parameter"] == "external_id"
+    assert mock.requests == []
+
+
+def test_callouts_empty_has_note(mock, own_key):
+    mock.routes[("csid.test", "/v1/callouts")] = ok([], pagination={"next_cursor": None})
+    out = call("csid_callouts", external_id="nobody-yet")
+    assert out["callouts"] == [] and "note" in out
+
+
+def test_callout_leaderboard(mock, own_key):
+    entry_ = {**SUMMARY, "rank": 1, "csid_id": "c1", "author": AUTHOR,
+              "best_call": {"id": "co1", "chain": "solana", "mint": BONK, "symbol": "BONK", "peak_x": 4.0}}
+    mock.routes[("csid.test", "/v1/callouts/leaderboard")] = ok(
+        {"period": "30d", "chain": None, "sort": "hit_rate", "hit_x": 3.0, "leaderboard": [entry_]},
+        pagination={"limit": 1, "total": 7, "has_more": True, "next_cursor": "o1"})
+    out = call("csid_callout_leaderboard", period="30d", sort="hit_rate", min_callouts=3, hit_x=3, limit=1)
+    params = mock.last().url.params
+    assert params["period"] == "30d" and params["sort"] == "hit_rate" and params["min_callouts"] == "3"
+    assert float(params["hit_x"]) == 3.0 and params["limit"] == "1" and "chain" not in params
+    row = out["leaderboard"][0]
+    assert row["rank"] == 1 and row["external_id"] == "u1" and row["hit_rate_percent"] == 50.0
+    assert "hit_rate" not in row and row["best_call"] == {"token": "BONK", "chain": "solana", "mint": BONK,
+                                                          "peak_x": 4.0}
+    assert out["chain"] == "all" and out["total"] == 7 and out["next_cursor"] == "o1"
+    call("csid_callout_leaderboard", chain="base")
+    assert mock.last().url.params["chain"] == "base" and mock.last().url.params["period"] == "7d"
+
+
+def test_callout_leaderboard_validation_and_empty(mock, own_key):
+    assert call("csid_callout_leaderboard", period="1y")["parameter"] == "period"
+    assert call("csid_callout_leaderboard", sort="pnl_usd")["parameter"] == "sort"
+    assert call("csid_callout_leaderboard", chain="sol")["parameter"] == "chain"
+    assert mock.requests == []
+    mock.routes[("csid.test", "/v1/callouts/leaderboard")] = ok(
+        {"period": "6h", "leaderboard": []}, pagination={"total": 0, "next_cursor": None})
+    out = call("csid_callout_leaderboard", period="6h")
+    assert out["leaderboard"] == [] and "note" in out and "next_cursor" not in out
+
+
+def test_callout_stats(mock, own_key):
+    periods = {p: {**SUMMARY, "avg_now_x": 1.2, "tracking": 1} for p in ("6h", "1d", "7d", "30d")}
+    periods["6h"] = {"callouts": 0, "avg_peak_x": None, "median_peak_x": None, "best_peak_x": None,
+                     "sum_peak_x": 0.0, "hits": 0, "hit_rate": 0.0, "avg_now_x": None, "tracking": 0}
+    mock.routes[("csid.test", "/v1/callouts/stats")] = ok(
+        {"user": AUTHOR, "hit_x": 2.0, "periods": periods, "callouts_all_time": 12})
+    out = call("csid_callout_stats", external_id=" u1 ")
+    params = mock.last().url.params
+    assert params["external_id"] == "u1" and "csid_id" not in params
+    assert out["user"]["external_id"] == "u1" and out["callouts_all_time"] == 12
+    assert out["periods"]["7d"]["hit_rate_percent"] == 50.0 and out["periods"]["7d"]["avg_now_x"] == 1.2
+    assert out["periods"]["6h"] == {"callouts": 0, "sum_peak_x": 0.0, "hits": 0, "hit_rate_percent": 0.0,
+                                    "tracking": 0}
+    call("csid_callout_stats", csid_id="c1", hit_x=5)
+    assert mock.last().url.params["csid_id"] == "c1" and float(mock.last().url.params["hit_x"]) == 5.0
+
+
+def test_callout_stats_validation(mock, own_key):
+    assert call("csid_callout_stats")["parameter"] == "external_id"
+    assert call("csid_callout_stats", external_id="u1", csid_id="c1")["parameter"] == "external_id"
+    assert mock.requests == []
+    mock.routes[("csid.test", "/v1/callouts/stats")] = fail(
+        404, "platform_user_not_found", "No user with this external_id in your instance.")
+    assert call("csid_callout_stats", external_id="nobody")["error"] == "platform_user_not_found"
+
+
+@pytest.mark.parametrize("tool,path,args", [
+    ("csid_callouts", "/v1/callouts", {}),
+    ("csid_callout_leaderboard", "/v1/callouts/leaderboard", {}),
+    ("csid_callout_stats", "/v1/callouts/stats", {"external_id": "u1"}),
+])
+def test_feature_not_enabled_passes_through(mock, own_key, tool, path, args):
+    mock.routes[("csid.test", path)] = fail(
+        403, "feature_not_enabled", "Callouts are not enabled for this instance. Contact CabalSpy to switch them on.")
+    out = call(tool, **args)
+    assert out["error"] == "feature_not_enabled" and "Callouts are not enabled" in out["message"]
+    assert out["contact"] == "contact@cabalspy.xyz" and "on request" in out["hint"]
+    assert "setup_url" not in out
+
+
+def test_competitions_callout_kind(mock, own_key):
+    comp = {"id": "k2", "name": "Best caller", "kind": "callouts", "chain": "all", "metric": "avg_peak_x",
+            "status": "running", "starts_at": "2026-10-27T00:00:00Z", "ends_at": "2026-11-03T00:00:00Z",
+            "participants": 30, "min_callouts": 3, "hit_x": 2.0, "wallet_trust": "all", "enrollment": "opt_in",
+            "late_join": True, "prizes": None, "rules_version": 1}
+    mock.routes[("csid.test", "/v1/competitions")] = ok([comp], pagination={"total": 1})
+    item = call("csid_competitions")["competitions"][0]
+    assert item["kind"] == "callouts" and item["min_callouts"] == 3 and item["hit_x"] == 2.0
+    assert item["metric"] == "avg_peak_x" and "min_trades" not in item
+    mock.routes[("csid.test", "/v1/competitions/detail")] = ok({**comp, "changes": [], "changed_while_running": False})
+    mock.routes[("csid.test", "/v1/competitions/standings")] = ok(
+        {"competition_id": "k2", "updated_at": "2026-10-28T16:50:00Z", "final": False,
+         "standings": [{"rank": 1, "external_id": "u1", "score": 3.2,
+                        "stats": {**SUMMARY, "best_call": {"symbol": "BONK", "peak_x": 4.0}}}]})
+    out = call("csid_competitions", competition_id="k2")
+    assert out["kind"] == "callouts" and out["min_callouts"] == 3 and out["hit_x"] == 2.0
+    assert out["standings"][0]["stats"]["best_call"]["symbol"] == "BONK"
+
+
+def test_competitions_trading_kind(mock, own_key):
+    comp = {"id": "k1", "name": "Weekly", "kind": "trading", "metric": "pnl_usd", "min_trades": 1,
+            "min_volume_usd": 0.0}
+    mock.routes[("csid.test", "/v1/competitions")] = ok([comp], pagination={"total": 1})
+    item = call("csid_competitions")["competitions"][0]
+    assert item["kind"] == "trading" and item["min_trades"] == 1 and "min_callouts" not in item
 
 
 # ── the refactored HTTP layer still behaves like before for the old tools ─────
