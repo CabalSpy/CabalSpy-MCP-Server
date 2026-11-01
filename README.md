@@ -4,7 +4,7 @@
 [![Glama](https://img.shields.io/badge/Glama-listed-blue?style=flat-square)](https://glama.ai/mcp/servers/CabalSpy/CabalSpy-MCP-Server)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet?style=flat-square)](https://modelcontextprotocol.io/)
 [![Chains](https://img.shields.io/badge/chains-5-brightgreen?style=flat-square)](#chain-coverage)
-[![Tools](https://img.shields.io/badge/tools-37-brightgreen?style=flat-square)](#tools)
+[![Tools](https://img.shields.io/badge/tools-38-brightgreen?style=flat-square)](#tools)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 Realtime **KOL API** and onchain wallet tracking for AI assistants. CabalSpy monitors labeled wallets — key opinion leaders (KOLs), smart money and whales — across **Solana, Base, BNB Chain, Ethereum and Robinhood Chain**, and exposes the data as Model Context Protocol tools.
@@ -71,7 +71,7 @@ Robinhood Chain is Robinhood's Ethereum L2 on the Arbitrum Orbit stack, with ETH
 
 ## Tools
 
-37 tools: 23 covering the full CabalSpy v1 API (including the curated calls) and 14 for CabalSpy ID. All read-only.
+38 tools: 23 covering the full CabalSpy v1 API (including the curated calls) and 15 for CabalSpy ID. All read-only.
 
 ### Wallets
 | Tool | What it does |
@@ -143,6 +143,14 @@ Callouts are an extra of [CabalSpy ID](https://docs.cabalspy.xyz/cabalspy-id), s
 | `csid_callout_stats` | One user's track record per period: callouts, average/median/best peak multiple, hit rate, average multiple now |
 
 Without the extra they return `feature_not_enabled` with a hint to ask for it.
+
+### Copy trading
+
+[Copy trading](https://docs.cabalspy.xyz/cabalspy-id/copy-trading) turns every trade of a trader in a user's Trade Feed into a ready-to-execute instruction (token, chain, side, amount in USD or share of the position to sell, price limit). Your platform executes it with the user's own wallet and reports it back as executed, failed or skipped; CabalSpy never holds keys and never trades. An instruction still pending after 120 seconds reads as `expired`. Available on every CabalSpy ID instance (no extra needed); users need the `trade_feed` consent. Read-only: changing copy settings and reporting status stays in the Data API.
+
+| Tool | What it returns |
+|---|---|
+| `csid_copy_trading` | `view=instructions` (default): the latest copy instructions of your platform or of one user (`external_id` or `csid_id`), filter by `status` (pending, executed, failed, skipped, expired). `view=settings`: one user's copy settings per trader (enabled, mode, amount/percent, cap, sides, slippage, managed by another platform) |
 
 ### Onboarding
 | Tool | What it does |
