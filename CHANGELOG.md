@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.7.0 — 2026-11-01
+
+- **Copy trading tool** for CabalSpy ID instances, read-only: `csid_copy_trading`.
+  - `view=instructions` (default) — the latest copy instructions of your platform or of one user (`external_id` or `csid_id`), optionally by `status` (pending, executed, failed, skipped, expired): trader, side, token, chain, mint, amount in USD (buys) or share to sell (sells), price and price limit, and what your platform reported back (executed amount, tx signature, note).
+  - `view=settings` — one user's copy settings per trader in their Trade Feed: enabled, mode, amount/percent, cap, sides, slippage and whether another platform manages copying of that trader.
+- `consent_required` (403) is passed through with a hint that the user has to grant the `trade_feed` consent, instead of the generic auth answer.
+- `get_started`, the server instructions and the README describe copy trading.
+
 ## 2.6.0 — 2026-10-31
 
 - **Callouts tools** for CabalSpy ID instances with the callouts extra, all read-only:

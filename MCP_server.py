@@ -55,7 +55,7 @@ DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
 #: CabalSpy API; the key's account needs a CabalSpy ID instance.
 CSID_API_BASE = os.environ.get("CSID_API_BASE", "https://api-id.cabalspy.xyz")
 TIMEOUT = 30.0
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
@@ -143,7 +143,15 @@ mcp = FastMCP(
         "callouts (latest, one token, one user), csid_callout_leaderboard ranks the callers "
         "and csid_callout_stats gives one user's track record. If they return "
         "'feature_not_enabled', callouts are not switched on for that instance: pass on the "
-        "hint to ask contact@cabalspy.xyz."
+        "hint to ask contact@cabalspy.xyz.\n\n"
+        "Copy trading (part of every CabalSpy ID instance): every trade of a trader in a "
+        "user's Trade Feed becomes a ready-to-execute instruction (token, chain, side, amount "
+        "in USD or share to sell, price limit) that the platform executes with the user's own "
+        "wallet and reports back as executed, failed or skipped. CabalSpy never holds keys or "
+        "trades; an instruction still pending after 120 s reads as 'expired'. "
+        "csid_copy_trading shows the instructions (view=instructions) or one user's copy "
+        "settings per trader (view=settings). It only reads. Users need the 'trade_feed' "
+        "consent; 'consent_required' means they have not granted it."
     ),
 )
 
@@ -289,9 +297,12 @@ _CSID_SETUP_CODES = {"product_not_enabled", "no_instance", "instance_required",
                      "instance_not_found", "instance_forbidden"}
 #: 403s that are about what the key may see, not about the key itself. Every
 #: other 401/403 (invalid key, no credits) keeps the usual auth answer.
-_CSID_PASS_403 = _CSID_SETUP_CODES | {"scope_not_allowed", "plan_user_limit", "feature_not_enabled"}
+_CSID_PASS_403 = _CSID_SETUP_CODES | {"scope_not_allowed", "plan_user_limit", "feature_not_enabled",
+                                     "consent_required"}
 #: Callouts are an extra that CabalSpy switches on per instance on request.
 CALLOUTS_CONTACT = "contact@cabalspy.xyz"
+#: Copy trading is part of every CabalSpy ID instance.
+COPY_TRADING_DOCS_URL = "https://docs.cabalspy.xyz/cabalspy-id/copy-trading"
 
 
 def _csid_error(code: str, message: str, status: int) -> dict:
@@ -311,6 +322,13 @@ def _csid_error(code: str, message: str, status: int) -> dict:
             f"on per instance on request. Ask CabalSpy at {CALLOUTS_CONTACT} to enable it for "
             "this instance. Nothing is wrong with the key."
         )
+    elif code == "consent_required":
+        out["hint"] = (
+            "The user has not granted your platform the 'trade_feed' consent that the Trade Feed "
+            "and copy trading need. They grant it when signing in with CabalSpy ID; nothing is "
+            "wrong with the key."
+        )
+        out["docs"] = COPY_TRADING_DOCS_URL
     return out
 
 
@@ -567,6 +585,7 @@ async def get_started() -> dict[str, Any]:
                 "csid_callouts": "callouts on your instance: latest, for one token or one user",
                 "csid_callout_leaderboard": "your best callers per period, scored by peak multiple",
                 "csid_callout_stats": "one user's callout track record per period",
+                "csid_copy_trading": "copy trading: the instructions sent to your platform, or one user's copy settings",
             },
             "callouts": (
                 "An extra of CabalSpy ID, switched on per instance on request "
@@ -576,6 +595,15 @@ async def get_started() -> dict[str, Any]:
                 "after 24 hours in a row below a $10k market cap. score_x is the peak multiple. "
                 "Without the extra the callout tools return 'feature_not_enabled'."
             ),
+            "copy_trading": (
+                "Every trade of a trader in a user's Trade Feed becomes a ready-to-execute "
+                "instruction (token, chain, side, amount or share to sell, price limit). Your "
+                "platform executes it with the user's own wallet and reports it back as executed, "
+                "failed or skipped; CabalSpy never holds keys or trades. Instructions expire after "
+                "120 seconds. Part of every CabalSpy ID instance; users need the 'trade_feed' "
+                "consent. Changing settings and reporting status happens in the Data API."
+            ),
+            "copy_trading_docs": COPY_TRADING_DOCS_URL,
             "white_label": (
                 "Platforms with their own login import their users and wallets into a CabalSpy "
                 "ID instance and get trades, PnL, leaderboards and competitions through "
@@ -2231,6 +2259,140 @@ async def csid_callout_stats(external_id: CalloutExternalIdArg = "",
         "user": _slim_caller(d.get("user")), "hit_x": d.get("hit_x", hit_x),
         "periods": periods, "callouts_all_time": d.get("callouts_all_time"),
     }))
+
+
+# ── Copy trading: trades of a trader become instructions for the copier ───────
+#
+# Part of every CabalSpy ID instance. Every trade of a trader in a user's Trade
+# Feed becomes a ready-to-execute instruction (sized by the user's copy settings
+# for that trader); the platform executes it with the user's own wallet and
+# reports executed / failed / skipped. CabalSpy never holds keys or trades. A
+# pending instruction past its 120 s reads as "expired". This tool only reads;
+# changing settings and reporting status stays in the Data API.
+
+COPY_VIEWS = ["instructions", "settings"]
+COPY_STATUSES = ["pending", "executed", "failed", "skipped", "expired"]
+
+
+def _slim_instruction(i: dict) -> dict:
+    a = i.get("action") or {}
+    trader = i.get("trader")
+    side = a.get("side")
+    return _drop_empty({
+        "id": i.get("id"), "status": i.get("status"), "created_at": i.get("created_at"),
+        "user": _drop_empty({"csid_id": i.get("csid_id"), "external_id": i.get("external_id")}),
+        "trader": (trader.get("username") or trader.get("name")) if isinstance(trader, dict) else trader,
+        "side": side,
+        "token": a.get("symbol") or a.get("name"),
+        "chain": a.get("blockchain"), "mint": a.get("mint"),
+        "amount_usd": a.get("amount_usd") if side == "buy" else None,
+        "sell_percent": a.get("sell_percent") if side == "sell" else None,
+        "price_usd": a.get("price_usd"),
+        "max_price_usd": a.get("max_price_usd"), "min_price_usd": a.get("min_price_usd"),
+        "executed_amount_usd": i.get("executed_amount_usd"),
+        "tx_signature": i.get("tx_signature"),
+        "note": i.get("note"),
+    })
+
+
+def _slim_copy_setting(row: dict) -> dict:
+    t = row.get("trader") or {}
+    c = row.get("copy") or {}
+    out: dict[str, Any] = {"trader": _drop_empty({"username": t.get("username"), "name": t.get("name"),
+                                                  "csid_id": t.get("csid_id")})}
+    out.update({k: c.get(k) for k in ("enabled", "mode", "amount_usd", "percent", "max_usd",
+                                       "sides", "slippage_bps")})
+    out["managed_by_other_platform"] = bool(row.get("managed_by_other_platform"))
+    return {k: v for k, v in out.items() if v is not None}
+
+
+@tool(annotations=READ_ONLY, structured_output=True)
+async def csid_copy_trading(view: Annotated[str, Field(description=(
+                                "'instructions' (default): the copy instructions sent to your "
+                                "platform, newest first. 'settings': one user's copy settings per "
+                                "trader in their Trade Feed (needs external_id or csid_id)."))] = "instructions",
+                            external_id: Annotated[str, Field(description=(
+                                "Only this user: their id on YOUR platform (external_id). Pass "
+                                "external_id or csid_id, not both; required for view=settings."))] = "",
+                            csid_id: Annotated[str, Field(description=(
+                                "Only this user: their CabalSpy ID user id (UUID). Pass external_id "
+                                "or csid_id, not both; required for view=settings."))] = "",
+                            status: Annotated[str, Field(description=(
+                                "view=instructions only: pending, executed, failed, skipped or "
+                                "expired. Leave empty for all."))] = "",
+                            limit: Annotated[int, Field(ge=1, le=50, description=(
+                                "How many instructions (1-50, default 10)."))] = 10,
+                            cursor: CursorArg = "",
+                            instance: InstanceArg = "", ctx: Context = None) -> dict[str, Any]:
+    """
+    Copy trading on YOUR CabalSpy ID instance. Copy trading turns every trade of a
+    trader in a user's Trade Feed into a ready-to-execute instruction: token,
+    chain, side, the amount in USD (buys) or the share of the copied position to
+    sell (sells), and a price limit. Your platform executes it with the user's own
+    wallet and reports it back as executed, failed or skipped. CabalSpy never
+    holds keys and never trades. Instructions are meant to be executed within
+    120 seconds; a pending one past that reads as 'expired'.
+
+    view=instructions (default): the latest instructions of your platform, or of
+    one user (external_id or csid_id), optionally by status. Each: id, status,
+    created_at, user, trader, side, token, chain, mint, amount_usd or
+    sell_percent, price_usd and the max/min price limit, plus what your platform
+    reported (executed_amount_usd, tx_signature, note). Use for "Which copy
+    trades failed today?".
+    view=settings: one user's copy settings per trader (enabled, mode fixed_usd or
+    percent, amount_usd, percent, max_usd cap, sides buys or both, slippage_bps,
+    and managed_by_other_platform when another platform copies that trader).
+
+    Part of every CabalSpy ID instance (no extra needed); users need the
+    'trade_feed' consent (otherwise consent_required). Read-only: changing
+    settings and reporting status stays in the Data API. Needs your own CabalSpy
+    API key with a CabalSpy ID instance (no demo).
+    """
+    view, status = view.strip().lower(), status.strip().lower()
+    external_id, csid_id = external_id.strip(), csid_id.strip()
+    if bad := _check_choice(view, COPY_VIEWS, "view"):
+        return bad
+    if status and (bad := _check_choice(status, COPY_STATUSES, "status")):
+        return bad
+    if bad := _check_callout_user(external_id, csid_id):
+        return bad
+    if view == "settings" and not external_id and not csid_id:
+        return {"error": "invalid_parameter", "parameter": "external_id",
+                "message": "view=settings needs the user's id on your platform (external_id) or their csid_id."}
+    if not _has_own_key(ctx):
+        return _CSID_NEEDS_KEY
+    inst = _resolve_instance(ctx, instance)
+    result: dict[str, Any]
+    if view == "settings":
+        payload, error = await _call("GET", "/v1/copy-trading/settings", ctx,
+                                     {"external_id": external_id, "csid_id": csid_id, "instance": inst},
+                                     base=CSID_API_BASE, csid=True)
+        if error:
+            return error
+        rows = payload.get("data") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        settings = [_slim_copy_setting(r) for r in rows if isinstance(r, dict)]
+        result = {"user": _drop_empty({"external_id": external_id, "csid_id": csid_id}),
+                  "settings": settings}
+        if not settings:
+            result["note"] = ("This user has no traders in their Trade Feed yet. Copy settings are "
+                              f"changed through the Data API: {COPY_TRADING_DOCS_URL}")
+        return _compact(result)
+    payload, error = await _call("GET", "/v1/copy-trading/instructions", ctx,
+                                 {"csid_id": csid_id, "external_id": external_id, "status": status,
+                                  "limit": limit, "cursor": cursor, "instance": inst},
+                                 base=CSID_API_BASE, csid=True)
+    if error:
+        return error
+    items = [_slim_instruction(i) for i in payload.get("data") or [] if isinstance(i, dict)]
+    result = {"instructions": items}
+    if nxt := _next_cursor(payload):
+        result["next_cursor"] = nxt
+    if not items:
+        result["note"] = ("No copy instructions match. They are created when a trader that a user "
+                          f"copies trades: {COPY_TRADING_DOCS_URL}")
+    return _compact(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

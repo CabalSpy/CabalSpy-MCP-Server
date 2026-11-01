@@ -1,6 +1,6 @@
 {
   "name": "cabalspy-mcp",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "MCP server for the CabalSpy API \u2014 query KOL, smart money and whale wallet activity on Solana, Base, BNB Chain, Ethereum and Robinhood Chain from Claude, Cursor and other AI assistants, plus CabalSpy ID (SocialFi): verified trader identities, wallet owners and token theses by holders.",
   "keywords": [
     "mcp",

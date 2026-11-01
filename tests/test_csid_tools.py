@@ -21,7 +21,7 @@ CSID_TOOLS = {
     "csid_profile", "csid_wallet_owner", "csid_kols", "csid_token_theses",
     "csid_latest_theses", "csid_user_theses", "csid_thesis", "csid_leaderboard",
     "csid_platform_user", "csid_platform_leaderboard", "csid_competitions",
-    "csid_callouts", "csid_callout_leaderboard", "csid_callout_stats",
+    "csid_callouts", "csid_callout_leaderboard", "csid_callout_stats", "csid_copy_trading",
 }
 BONK = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 
@@ -611,6 +611,120 @@ def test_competitions_trading_kind(mock, own_key):
     mock.routes[("csid.test", "/v1/competitions")] = ok([comp], pagination={"total": 1})
     item = call("csid_competitions")["competitions"][0]
     assert item["kind"] == "trading" and item["min_trades"] == 1 and "min_callouts" not in item
+
+
+# ── copy trading (every instance, trade_feed consent) ─────────────────────────
+
+TRADER = {"csid_id": "t1", "username": "whale", "name": "Whale", "image_url": None, "kol": True,
+          "profile_url": "https://id.cabalspy.xyz/u/whale"}
+COPY_VIEW = {"enabled": True, "mode": "fixed_usd", "amount_usd": 50.0, "percent": 10.0, "max_usd": None,
+             "sides": "both", "slippage_bps": 300, "updated_at": "2026-11-01T10:00:00Z"}
+
+
+def instruction(i: int, side: str = "buy", status: str = "pending") -> dict:
+    """The shape of app/copy_trading.py present() (body() plus the reported status)."""
+    return {
+        "id": f"ci{i}", "type": "copy_instruction", "status": status,
+        "created_at": "2026-11-01T12:00:00Z", "expires_at": "2026-11-01T12:02:00Z",
+        "csid_id": "c1", "trader": TRADER,
+        "action": {"blockchain": "solana", "mint": BONK, "symbol": "BONK", "name": "Bonk", "logo": None,
+                   "side": side, "amount_usd": 50.0 if side == "buy" else None, "amount_native": 0.25,
+                   "currency": "SOL", "sell_percent": 40.0 if side == "sell" else None, "price_usd": 0.00002,
+                   "max_price_usd": 0.0000206 if side == "buy" else None,
+                   "min_price_usd": 0.0000194 if side == "sell" else None, "slippage_bps": 300},
+        "source_trade": {"blockchain": "solana", "mint": BONK}, "settings": COPY_VIEW, "links": {},
+        "tx_signature": "5sig" if status == "executed" else None,
+        "executed_amount_usd": 49.5 if status == "executed" else None,
+        "note": "slippage" if status == "failed" else None, "updated_at": "2026-11-01T12:00:30Z",
+    }
+
+
+def test_copy_trading_refuses_demo_without_calling(mock):
+    assert call("csid_copy_trading")["error"] == "csid_setup_required"
+    assert call("csid_copy_trading", view="settings", external_id="u1")["error"] == "csid_setup_required"
+    assert mock.requests == []
+
+
+def test_copy_trading_validation(mock, own_key):
+    assert call("csid_copy_trading", view="trades")["parameter"] == "view"
+    assert call("csid_copy_trading", status="done")["parameter"] == "status"
+    assert call("csid_copy_trading", external_id="u1", csid_id="c1")["parameter"] == "external_id"
+    assert call("csid_copy_trading", view="settings")["parameter"] == "external_id"
+    assert mock.requests == []
+
+
+def test_copy_trading_instructions_slim(mock, own_key):
+    mock.routes[("csid.test", "/v1/copy-trading/instructions")] = ok(
+        [instruction(1, "buy", "executed"), {**instruction(2, "sell", "failed"), "external_id": "u1"}],
+        pagination={"limit": 2, "has_more": True, "next_cursor": "nx"})
+    out = call("csid_copy_trading", external_id=" u1 ", status="Executed", limit=2, cursor="c0", instance="csid_x")
+    params = mock.last().url.params
+    assert mock.last().url.path == "/v1/copy-trading/instructions"
+    assert params["external_id"] == "u1" and params["status"] == "executed" and params["limit"] == "2"
+    assert params["cursor"] == "c0" and params["instance"] == "csid_x" and "csid_id" not in params
+    assert out["instructions"][0] == {
+        "id": "ci1", "status": "executed", "created_at": "2026-11-01T12:00:00Z", "user": {"csid_id": "c1"},
+        "trader": "whale", "side": "buy", "token": "BONK", "chain": "solana", "mint": BONK,
+        "amount_usd": 50.0, "price_usd": 0.00002, "max_price_usd": 0.0000206,
+        "executed_amount_usd": 49.5, "tx_signature": "5sig"}
+    sell = out["instructions"][1]
+    assert sell["side"] == "sell" and sell["sell_percent"] == 40.0 and "amount_usd" not in sell
+    assert sell["min_price_usd"] == 0.0000194 and sell["note"] == "slippage"
+    assert sell["user"] == {"csid_id": "c1", "external_id": "u1"}
+    assert out["next_cursor"] == "nx"
+    call("csid_copy_trading")
+    params = mock.last().url.params
+    assert params["limit"] == "10" and "status" not in params and "external_id" not in params
+
+
+def test_copy_trading_instructions_empty_and_expired(mock, own_key):
+    mock.routes[("csid.test", "/v1/copy-trading/instructions")] = ok([], pagination={"next_cursor": None})
+    out = call("csid_copy_trading", csid_id="c1", status="expired")
+    assert mock.last().url.params["csid_id"] == "c1" and mock.last().url.params["status"] == "expired"
+    assert out["instructions"] == [] and "note" in out and "next_cursor" not in out
+
+
+def test_copy_trading_settings(mock, own_key):
+    other = {"trader": {**TRADER, "csid_id": "t2", "username": None, "name": "Managed"},
+             "copy": {**COPY_VIEW, "enabled": False, "mode": "percent", "max_usd": 200.0, "sides": "buys"},
+             "managed_by_other_platform": True}
+    mock.routes[("csid.test", "/v1/copy-trading/settings")] = ok(
+        [{"trader": TRADER, "copy": COPY_VIEW, "managed_by_other_platform": False}, other])
+    out = call("csid_copy_trading", view="Settings", csid_id="c1")
+    params = mock.last().url.params
+    assert mock.last().url.path == "/v1/copy-trading/settings" and params["csid_id"] == "c1"
+    assert "limit" not in params and "status" not in params
+    assert out["user"] == {"csid_id": "c1"}
+    assert out["settings"][0] == {
+        "trader": {"username": "whale", "name": "Whale", "csid_id": "t1"}, "enabled": True, "mode": "fixed_usd",
+        "amount_usd": 50.0, "percent": 10.0, "sides": "both", "slippage_bps": 300,
+        "managed_by_other_platform": False}
+    second = out["settings"][1]
+    assert second["trader"] == {"name": "Managed", "csid_id": "t2"} and second["max_usd"] == 200.0
+    assert second["managed_by_other_platform"] is True and second["enabled"] is False
+    mock.routes[("csid.test", "/v1/copy-trading/settings")] = ok([])
+    out = call("csid_copy_trading", view="settings", external_id="u9")
+    assert mock.last().url.params["external_id"] == "u9" and out["settings"] == [] and "note" in out
+
+
+def test_copy_trading_errors_pass_through(mock, own_key):
+    mock.routes[("csid.test", "/v1/copy-trading/settings")] = fail(
+        403, "consent_required", "The user has not granted the trade_feed scope to your app.")
+    out = call("csid_copy_trading", view="settings", external_id="u1")
+    assert out["error"] == "consent_required" and "trade_feed" in out["hint"]
+    assert out["docs"] == srv.COPY_TRADING_DOCS_URL and "setup_url" not in out
+    mock.routes[("csid.test", "/v1/copy-trading/instructions")] = fail(
+        404, "platform_user_not_found", "No user with this external_id in your instance.")
+    assert call("csid_copy_trading", external_id="nobody")["error"] == "platform_user_not_found"
+    mock.routes[("csid.test", "/v1/copy-trading/instructions")] = fail(400, "invalid_parameter", "bad cursor")
+    assert call("csid_copy_trading", cursor="junk")["error"] == "invalid_parameter"
+
+
+def test_get_started_mentions_copy_trading():
+    out = call("get_started")
+    csid = out["cabalspy_id"]
+    assert "csid_copy_trading" in csid["tools"] and "120 seconds" in csid["copy_trading"]
+    assert csid["copy_trading_docs"] == "https://docs.cabalspy.xyz/cabalspy-id/copy-trading"
 
 
 # ── the refactored HTTP layer still behaves like before for the old tools ─────
