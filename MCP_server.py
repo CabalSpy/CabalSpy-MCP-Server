@@ -55,7 +55,7 @@ DEMO_KEY = os.environ.get("CABALSPY_DEMO_KEY", "demo")
 #: CabalSpy API; the key's account needs a CabalSpy ID instance.
 CSID_API_BASE = os.environ.get("CSID_API_BASE", "https://api-id.cabalspy.xyz")
 TIMEOUT = 30.0
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 PRICING_URL = "https://www.cabalspy.xyz/pricing/"
 DASHBOARD_URL = "https://apidashboard.cabalspy.xyz/"
@@ -142,8 +142,8 @@ mcp = FastMCP(
         "$10k market cap). score_x is the peak multiple since the call. csid_callouts lists "
         "callouts (latest, one token, one user), csid_callout_leaderboard ranks the callers "
         "and csid_callout_stats gives one user's track record. If they return "
-        "'feature_not_enabled', callouts are not switched on for that instance: pass on the "
-        "hint to ask contact@cabalspy.xyz.\n\n"
+        "'feature_not_enabled', callouts are not switched on for that instance; tell the user "
+        "that the platform can request them from CabalSpy.\n\n"
         "Copy trading (part of every CabalSpy ID instance): every trade of a trader in a "
         "user's Trade Feed becomes a ready-to-execute instruction (token, chain, side, amount "
         "in USD or share to sell, price limit) that the platform executes with the user's own "
@@ -871,23 +871,25 @@ async def get_token_stats(blockchain: ChainArg, mint: MintArg,
 async def get_token_holders(blockchain: ChainArg, mint: MintArg,
                             wallet_type: OptionalWalletTypeArg = "",
                             limit: LimitArg = 25,
+                            cursor: CursorArg = "",
                             ctx: Context = None) -> dict[str, Any]:
     """
     The tracked wallets holding a token, sorted by balance, with market cap and
-    price in USD on Solana. Use when the user asks who is still holding, rather
+    price on every chain. Use when the user asks who is still holding, rather
     than who ever traded it.
 
     blockchain: solana, bnb, base, eth or rh
     mint: token address
     wallet_type: restrict to kol, smart or whale. Omit to merge all types.
     limit: how many holders (default 25)
+    cursor: pagination.next_cursor from the previous page, with the same limit
     """
     if bad := _check_type(blockchain, wallet_type or None):
         return bad
     return _with_trade_url(
         await _request("GET", "/v1/tokens/holders", ctx,
                        {"blockchain": blockchain, "mint": mint,
-                        "type": wallet_type, "limit": limit}),
+                        "type": wallet_type, "limit": limit, "cursor": cursor}),
         blockchain, mint)
 
 
@@ -895,23 +897,33 @@ async def get_token_holders(blockchain: ChainArg, mint: MintArg,
 async def get_token_transactions(blockchain: ChainArg, mint: MintArg,
                                  wallet_type: OptionalWalletTypeArg = "",
                                  limit: LimitArg = 25,
+                                 since: Annotated[str, Field(description=(
+                                     "Only trades at or after this time: ISO 8601 (UTC), Unix "
+                                     "seconds or milliseconds. Pass the created_at of the newest "
+                                     "trade already seen to get only new ones; a check that finds "
+                                     "nothing new costs no credits. Leave empty for the latest trades."
+                                 ))] = "",
+                                 cursor: CursorArg = "",
                                  ctx: Context = None) -> dict[str, Any]:
     """
-    Individual buys and sells by tracked wallets in one token, most recent first.
-    Use for the sequence of events, for example whether KOLs bought before or after
-    a price move.
+    Individual buys and sells by tracked wallets in one token, most recent first,
+    each with the market cap at the moment of the trade. Use for the sequence of
+    events, for example whether KOLs bought before or after a price move, or with
+    since to check what happened after a given time.
 
     blockchain: solana, bnb, base, eth or rh
     mint: token address
     wallet_type: restrict to kol, smart or whale. Omit to merge all types.
     limit: how many transactions (default 25)
+    since: only trades at or after this time (inclusive)
+    cursor: pagination.next_cursor from the previous page, with the same limit
     """
     if bad := _check_type(blockchain, wallet_type or None):
         return bad
     return _with_trade_url(
         await _request("GET", "/v1/tokens/transactions", ctx,
-                       {"blockchain": blockchain, "mint": mint,
-                        "type": wallet_type, "limit": limit}),
+                       {"blockchain": blockchain, "mint": mint, "type": wallet_type,
+                        "limit": limit, "since": since, "cursor": cursor}),
         blockchain, mint)
 
 
@@ -1055,7 +1067,7 @@ async def get_signals(
 
     Only the first page is reachable: this endpoint reports that more results
     exist but does not return a usable cursor, so raise the limit rather than
-    trying to paginate. Smart money signals are unavailable on eth.
+    trying to paginate.
 
     blockchain: solana, bnb, base, eth or rh
     wallet_type: kol, smart or whale (default kol)

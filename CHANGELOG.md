@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.8.0 — 2026-11-15
+
+- `get_token_transactions` takes `since` (ISO 8601, Unix seconds or milliseconds) to return only trades from that time on; a check that finds no new trade costs no credits. It also takes `cursor` for paging, and its description mentions the market cap at each trade.
+- `get_token_holders` takes `cursor` for paging. Market cap and price are described as available on every chain, not only Solana.
+- `get_signals` no longer says Smart Money signals are unavailable on Ethereum; they are.
+- The server instructions no longer contain an email address: for `feature_not_enabled` they tell the model that the platform can request callouts from CabalSpy. The error itself still carries the contact.
+- `server.json`: title, icon and repository for the MCP registry.
+
 ## 2.7.0 — 2026-11-01
 
 - **Copy trading tool** for CabalSpy ID instances, read-only: `csid_copy_trading`.

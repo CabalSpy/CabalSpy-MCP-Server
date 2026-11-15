@@ -1,13 +1,28 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "xyz.cabalspy/wallet-tracker",
+  "title": "CabalSpy",
   "description": "KOL and smart money tracking on 5 chains, plus CabalSpy ID (SocialFi): verified traders, theses.",
-  "version": "2.7.0",
+  "repository": {
+    "url": "https://github.com/CabalSpy/CabalSpy-MCP-Server",
+    "source": "github",
+    "id": "1256499772"
+  },
+  "version": "2.8.0",
+  "websiteUrl": "https://www.cabalspy.xyz/mcp/",
+  "icons": [
+    {
+      "src": "https://www.cabalspy.xyz/images/cabalspy-icon-512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
   "remotes": [
     {
       "type": "streamable-http",
       "url": "https://mcp.cabalspy.xyz/mcp"
     }
-  ],
-  "websiteUrl": "https://www.cabalspy.xyz/mcp/"
+  ]
 }
